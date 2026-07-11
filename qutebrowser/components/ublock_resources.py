@@ -191,27 +191,42 @@ def _preprocess_scriptlets_js(content: str) -> str:
     Strips import statements, replaces exports with globals, and hooks
     builtinScriptlets.push() to call the Python bridge.
     """
-    # Strip import statements (both bare and named imports)
     lines = content.split('\n')
     filtered: list[str] = []
+    in_import_block = False
+
     for line in lines:
         stripped = line.strip()
-        # Strip import ... from '...' and import '...'
+
+        # Handle multi-line import blocks: import { ... } from '...';
+        if in_import_block:
+            if 'from ' in stripped and stripped.endswith(';'):
+                in_import_block = False
+            continue
+
+        if stripped.startswith('import {'):
+            in_import_block = True
+            continue
+
+        # Strip single-line imports: import '...' or import x from '...'
         if stripped.startswith('import ') and ('from ' in stripped or stripped.endswith(';')):
             continue
+
         # Strip export { ... }
-        if stripped.startswith('export {') and stripped.endswith('}'):
+        if stripped.startswith('export {') and (stripped.endswith('}') or stripped.endswith('};')):
             continue
-        if stripped.startswith('export {') and stripped.endswith('};'):
-            continue
+
         if stripped.startswith('export type {'):
             continue
+
         # Skip builtinScriptlets declaration (handled in stubs)
         if 'builtinScriptlets' in stripped and ('= registeredScriptlets' in stripped or '= []' in stripped):
             continue
+
         # Replace export const/function/class with const/function/class
         if stripped.startswith('export '):
             line = line.replace('export ', '', 1)
+
         filtered.append(line)
 
     js = '\n'.join(filtered)
