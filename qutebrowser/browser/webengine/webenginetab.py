@@ -10,12 +10,14 @@ import functools
 import dataclasses
 import re
 import html as html_utils
+from collections import OrderedDict
 from typing import cast, TypeAlias
 
 from qutebrowser.qt.core import (pyqtSignal, pyqtSlot, Qt, QPoint, QPointF, QUrl,
                           QObject, QByteArray, QTimer)
 from qutebrowser.qt.network import QAuthenticator
 from qutebrowser.qt.webenginecore import QWebEnginePage, QWebEngineScript, QWebEngineHistory
+from qutebrowser.qt.webengine import QtWebEngineScript
 
 from qutebrowser.config import config
 from qutebrowser.browser import browsertab, eventfilter, shared, webelem, greasemonkey
@@ -36,6 +38,27 @@ _JS_WORLD_MAP = {
     usertypes.JsWorld.user: QWebEngineScript.ScriptWorldId.UserWorld,
     usertypes.JsWorld.jseval: QWebEngineScript.ScriptWorldId.UserWorld + 1,
 }
+
+
+def _convert_usertype_world_id(world: usertypes.JsWorld) -> int:
+    """Convert a JsWorld enum to a Qt JavaScript world ID."""
+    if world == usertypes.JsWorld.application:
+        return QtWebEngineScript.ApplicationWorld
+    if world == usertypes.JsWorld.user:
+        return QtWebEngineScript.UserWorld
+    if world == usertypes.JsWorld.main:
+        return QtWebEngineScript.MainWorld
+    raise ValueError(f"Invalid JsWorld: {world!r}")
+
+
+def _convert_usertype_injection_point(injection_point: usertypes.InjectionPoint) -> int:
+    """Convert InjectionPoint enum to Qt injection point."""
+    mapping = {
+        usertypes.InjectionPoint.deferred: QtWebEngineScript.InjectionPoint.Deferred,
+        usertypes.InjectionPoint.ready: QtWebEngineScript.InjectionPoint.DocumentReady,
+        usertypes.InjectionPoint.creation: QtWebEngineScript.InjectionPoint.DocumentCreation,
+    }
+    return mapping[injection_point]
 
 
 class WebEngineAction(browsertab.AbstractAction):
@@ -1039,6 +1062,8 @@ class _WebEngineScripts(QObject):
         self._tab = tab
         self._widget = cast(webview.WebEngineView, None)
         self._greasemonkey = greasemonkey.gm_manager
+        self._dynamic_css: dict[str, str] = OrderedDict()
+        self._web_scripts: dict[str, QtWebEngineScript] = OrderedDict()
 
     def connect_signals(self):
         """Connect signals to our private slots."""
@@ -1058,6 +1083,9 @@ class _WebEngineScripts(QObject):
     def _update_stylesheet(self, searching=False):
         """Update the custom stylesheet in existing tabs."""
         css = shared.get_user_stylesheet(searching=searching)
+        dynamic_css = '\n'.join(self._dynamic_css.values())
+        if dynamic_css:
+            css = dynamic_css + '\n' + css
         code = javascript.assemble('stylesheet', 'set_css', css)
         self._tab.run_js_async(code)
 
@@ -1073,6 +1101,8 @@ class _WebEngineScripts(QObject):
         script.setRunsOnSubFrames(subframes)
         script.setName(f'_qute_{name}')
         self._widget.page().scripts().insert(script)
+        for script in self._web_scripts.values():
+            self._widget.page().scripts().insert(script)
 
     def _remove_js(self, name):
         """Remove an early QWebEngineScript."""
@@ -1240,6 +1270,33 @@ class _WebEngineScripts(QObject):
                     injection_point=quirk.injection_point,
                 )
 
+    def add_dynamic_css(self, name: str, css: str) -> None:
+        self._dynamic_css[name] = css
+        self._update_stylesheet()
+
+    def remove_dynamic_css(self, name: str) -> None:
+        self._dynamic_css.pop(name, None)
+        self._update_stylesheet()
+
+    def add_web_script(self, name: str, js_code: str,
+                       world: usertypes.JsWorld,
+                       injection_point: usertypes.InjectionPoint,
+                       subframes: bool) -> None:
+        script = QtWebEngineScript()
+        script.setName(name)
+        script.setSourceCode(js_code)
+        script.setWorldId(_convert_usertype_world_id(world))
+        script.setInjectionPoint(_convert_usertype_injection_point(injection_point))
+        script.setRunsOnSubFrames(subframes)
+        self._web_scripts[name] = script
+        self._widget.page().scripts().insert(script)
+
+    def remove_web_script(self, name: str) -> None:
+        self._web_scripts.pop(name, None)
+        page = self._widget.page()
+        for s in self._web_scripts.values():
+            page.scripts().insert(s)
+
 
 class WebEngineTabPrivate(browsertab.AbstractTabPrivate):
 
@@ -1373,7 +1430,7 @@ class WebEngineTab(browsertab.AbstractTab):
         else:
             self._widget.page().toHtml(callback)
 
-    def run_js_async(self, code, callback=None, *, world=None):
+    def run_js_async(self, code, callback=None, *, world=None, name: str = ''):
         if sip.isdeleted(self._widget):
             # https://github.com/qutebrowser/qutebrowser/issues/3895
             log.misc.debug("run_js_async called on deleted tab")
@@ -1395,6 +1452,21 @@ class WebEngineTab(browsertab.AbstractTab):
             self._widget.page().runJavaScript(code, world_id)
         else:
             self._widget.page().runJavaScript(code, world_id, callback)
+
+    def add_dynamic_css(self, name: str, css: str) -> None:
+        self._scripts.add_dynamic_css(name, css)
+
+    def remove_dynamic_css(self, name: str) -> None:
+        self._scripts.remove_dynamic_css(name)
+
+    def add_web_script(self, name: str, js_code: str,
+                       world: usertypes.JsWorld,
+                       injection_point: usertypes.InjectionPoint,
+                       subframes: bool) -> None:
+        self._scripts.add_web_script(name, js_code, world, injection_point, subframes)
+
+    def remove_web_script(self, name: str) -> None:
+        self._scripts.remove_web_script(name)
 
     def reload(self, *, force=False):
         if force:
