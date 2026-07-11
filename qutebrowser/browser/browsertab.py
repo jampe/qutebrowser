@@ -1065,6 +1065,14 @@ class AbstractTab(QWidget):
 
         self.before_load_started.connect(self._on_before_load_started)
 
+        from qutebrowser.extensions import loader  # pylint: disable=import-outside-toplevel
+        self.before_load_started.connect(  # type: ignore[attr-defined]
+            functools.partial(loader.run_before_load_hooks, self))
+        self.load_started.connect(  # type: ignore[attr-defined]
+            functools.partial(loader.run_load_started_hooks, self))
+        self.load_finished.connect(  # type: ignore[attr-defined]
+            functools.partial(loader.run_load_finished_hooks, self))
+
     def _set_widget(self, widget: _WidgetType) -> None:
         # pylint: disable=protected-access
         self._widget = widget
@@ -1176,6 +1184,9 @@ class AbstractTab(QWidget):
                                   navigation.url.toDisplayString(),
                                   navigation.url.errorString()))
             navigation.accepted = False
+            return
+
+        self.before_load_started.emit(navigation.url)  # type: ignore[attr-defined]
 
     @pyqtSlot(bool)
     def _on_load_finished(self, ok: bool) -> None:
@@ -1270,7 +1281,8 @@ class AbstractTab(QWidget):
             self,
             code: str,
             callback: Callable[[Any], None] | None = None, *,
-            world: usertypes.JsWorld | int | None = None
+            world: usertypes.JsWorld | int | None = None,
+            name: str = '',
     ) -> None:
         """Run javascript async.
 
@@ -1283,6 +1295,21 @@ class AbstractTab(QWidget):
             world: A world ID (int or usertypes.JsWorld member) to run the JS
                    in the main world or in another isolated world.
         """
+        raise NotImplementedError
+
+    def add_dynamic_css(self, name: str, css: str) -> None:
+        raise NotImplementedError
+
+    def remove_dynamic_css(self, name: str) -> None:
+        raise NotImplementedError
+
+    def add_web_script(self, name: str, js_code: str,
+                       world: usertypes.JsWorld,
+                       injection_point: usertypes.InjectionPoint,
+                       subframes: bool) -> None:
+        raise NotImplementedError
+
+    def remove_web_script(self, name: str) -> None:
         raise NotImplementedError
 
     def title(self) -> str:
