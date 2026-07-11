@@ -14,7 +14,16 @@ import pathlib
 import re
 from typing import Optional, IO, List, Dict
 
-from qutebrowser.qt.core import QUrl
+from qutebrowser.qt.core import QCoreApplication, QObject, QUrl, pyqtSlot
+
+try:
+    from qutebrowser.qt.qml import QJSEngine, QJSValue
+    _QJS_AVAILABLE = True
+except ImportError:
+    QJSEngine = None  # type: ignore[assignment,misc]
+    QJSValue = None  # type: ignore[assignment,misc]
+    _QJS_AVAILABLE = False
+
 from qutebrowser.api import (
     message,
 )
@@ -37,6 +46,45 @@ class Resource:
     aliases: List[str]
     content_type: str
     content: str
+
+
+class ScriptletBridge(QObject):
+    """Bridge object exposed to QJSEngine to capture scriptlet registrations."""
+
+    def __init__(self, engine: QJSEngine) -> None:
+        super().__init__(parent=engine)
+        self.resources: list[Resource] = []
+
+    @pyqtSlot(str, 'QJSValue')
+    def registerScriptlet(self, name: str, fn: QJSValue) -> None:
+        """Called from JS when builtinScriptlets.push() is called.
+
+        fn is a QJSValue holding a JavaScript function.
+        fn.toString() returns the function source code.
+        """
+        source = fn.toString()
+        if not source:
+            return
+        content = base64.b64encode(source.encode()).decode("utf-8")
+        self.resources.append(Resource(
+            name=name,
+            aliases=[],
+            content_type="application/javascript",
+            content=content,
+        ))
+
+    @pyqtSlot(str, 'QJSValue')
+    def registerAliases(self, name: str, aliases: QJSValue) -> None:
+        """Called from JS to set aliases for a scriptlet."""
+        alias_list: list[str] = (
+            aliases.toVariant()
+            if not aliases.isUndefined() and not aliases.isNull()
+            else []
+        )
+        for r in self.resources:
+            if r.name == name:
+                r.aliases = alias_list
+                break
 
 
 class EngineInfo:
@@ -64,7 +112,7 @@ _REDIRECT_RESOURCES_URL = QUrl(
 )
 
 _SCRIPTLETS_URL = QUrl(
-    "https://raw.githubusercontent.com/gorhill/uBlock/master/assets/resources/scriptlets.js"
+    "https://raw.githubusercontent.com/gorhill/uBlock/master/src/js/resources/scriptlets.js"
 )
 
 _WEB_ACCESSIBLE_RESOURCES_URL_TEMPLATE = (
@@ -135,6 +183,98 @@ def _parse_resource(
     )
 
 
+def _preprocess_scriptlets_js(content: str) -> str:
+    """Pre-process scriptlets.js ES module for QJSEngine evaluation.
+
+    Strips import statements, replaces exports with globals, and hooks
+    builtinScriptlets.push() to call the Python bridge.
+    """
+    # Strip import statements (both bare and named imports)
+    lines = content.split('\n')
+    filtered: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        # Strip import ... from '...' and import '...'
+        if stripped.startswith('import ') and ('from ' in stripped or stripped.endswith(';')):
+            continue
+        # Strip export { ... }
+        if stripped.startswith('export {') and stripped.endswith('}'):
+            continue
+        if stripped.startswith('export {') and stripped.endswith('};'):
+            continue
+        if stripped.startswith('export type {'):
+            continue
+        # Skip builtinScriptlets declaration (handled in stubs)
+        if 'builtinScriptlets' in stripped and ('= registeredScriptlets' in stripped or '= []' in stripped):
+            continue
+        # Replace export const/function/class with const/function/class
+        if stripped.startswith('export '):
+            line = line.replace('export ', '', 1)
+        filtered.append(line)
+
+    js = '\n'.join(filtered)
+
+    # Add stubs and hook before the scriptlets.js content
+    # Note: we need to hook Array.prototype.push on builtinScriptlets
+    stubs = '''
+var registeredScriptlets = [];
+var builtinScriptlets = [];
+var scriptletGlobals = { canDebug: false };
+// Hook builtinScriptlets.push to capture registrations
+const _origPush = builtinScriptlets.push;
+builtinScriptlets.push = function(item) {
+    if (item && item.name && item.fn) {
+        Bridge.registerScriptlet(item.name, item.fn);
+        if (item.aliases) {
+            Bridge.registerAliases(item.name, item.aliases);
+        }
+    }
+    return _origPush.call(builtinScriptlets, item);
+};
+'''
+
+    return stubs + '\n' + js
+
+
+def _parse_scriptlets_qjs(content: str) -> list[Resource]:
+    """Parse scriptlets.js using QJSEngine to handle ES module format.
+
+    Falls back to empty list if QJSEngine is unavailable.
+    """
+    if not _QJS_AVAILABLE:
+        logger.error("braveadblock: QJSEngine not available, cannot parse scriptlets")
+        return []
+
+    try:
+        app = QCoreApplication.instance()
+        if app is None:
+            app = QCoreApplication([])
+
+        engine = QJSEngine()
+        bridge = ScriptletBridge(engine)
+        js_bridge = engine.newQObject(bridge)
+        engine.globalObject().setProperty('Bridge', js_bridge)
+
+        js_code = _preprocess_scriptlets_js(content)
+
+        result = engine.evaluate(js_code, 'scriptlets.js')
+        if result.isError():
+            logger.error(
+                "braveadblock: QJSEngine scriptlet parse error: %s",
+                result.toString()
+            )
+            return []
+
+        return bridge.resources
+
+    except ImportError:
+        logger.error("braveadblock: QJSEngine not available, cannot parse scriptlets")
+        return []
+    except RuntimeError as e:
+        logger.error("braveadblock: QJSEngine runtime error: %s", e)
+        return []
+
+
 _TOP_COMMENT_RE = r"^/\*[\S\s]+?\n\*/\s*"
 _NON_EMPTY_LINE_RE = r"\S"
 
@@ -157,7 +297,7 @@ def _parse_scriptlets(
                 current_resource = Resource(name, [], "", "")
             continue
 
-        if line.startswith("/// "):  # type: ignore[unreachable]
+        if line.startswith("/// "):
             tokens = line[4:].split()
             if len(tokens) >= 2 and tokens[0] == "alias":
                 current_resource.aliases.append(tokens[1])
@@ -194,7 +334,8 @@ def _on_resource_download(
     """
     try:
         if url == _SCRIPTLETS_URL:
-            resources.extend(_parse_scriptlets(fileobj))
+            content = fileobj.read().decode("utf-8")
+            resources.extend(_parse_scriptlets_qjs(content))
         else:
             resources.append(_parse_resource(aliases_map, url, fileobj))
     except UnicodeDecodeError:
