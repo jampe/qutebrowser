@@ -103,11 +103,14 @@ window._qutebrowser.stylesheet = (function() {
         style_observer.observe(document, {"childList": true, "subtree": true});
     }
 
-    funcs.set_css = function(css) {
+    funcs.set_css = function(css, debug = false) {
         if (!initialized) {
             init();
         }
         if (style_elem) {
+            if (debug) {
+                console.log("set_css: " + css.substring(0, 30));
+            }
             style_elem.textContent = css;
             // The browser seems to rewrite the document in same-origin frames
             // without notifying the mutation observer. Ensure that the

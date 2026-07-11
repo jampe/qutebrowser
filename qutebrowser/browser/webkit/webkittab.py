@@ -907,12 +907,28 @@ class WebKitTab(browsertab.AbstractTab):
         else:
             callback(frame.toHtml())
 
-    def run_js_async(self, code, callback=None, *, world=None):
+    def run_js_async(self, code, callback=None, *, world=None,
+                     name: str = ''):
         if world is not None and world != usertypes.JsWorld.jseval:
             log.webview.warning("Ignoring world ID {}".format(world))
         result = self.private_api.run_js_sync(code)
         if callback is not None:
             callback(result)
+
+    def add_dynamic_css(self, name: str, css: str) -> None:
+        raise NotImplementedError
+
+    def remove_dynamic_css(self, name: str) -> None:
+        raise NotImplementedError
+
+    def add_web_script(self, name: str, js_code: str,
+                       world: usertypes.JsWorld,
+                       injection_point: usertypes.InjectionPoint,
+                       subframes: bool) -> None:
+        raise NotImplementedError
+
+    def remove_web_script(self, name: str) -> None:
+        raise NotImplementedError
 
     def icon(self):
         return self._widget.icon()
