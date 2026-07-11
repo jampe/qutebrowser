@@ -17,7 +17,6 @@ from qutebrowser.qt.core import (pyqtSignal, pyqtSlot, Qt, QPoint, QPointF, QUrl
                           QObject, QByteArray, QTimer)
 from qutebrowser.qt.network import QAuthenticator
 from qutebrowser.qt.webenginecore import QWebEnginePage, QWebEngineScript, QWebEngineHistory
-from qutebrowser.qt.webengine import QtWebEngineScript
 
 from qutebrowser.config import config
 from qutebrowser.browser import browsertab, eventfilter, shared, webelem, greasemonkey
@@ -43,20 +42,20 @@ _JS_WORLD_MAP = {
 def _convert_usertype_world_id(world: usertypes.JsWorld) -> int:
     """Convert a JsWorld enum to a Qt JavaScript world ID."""
     if world == usertypes.JsWorld.application:
-        return QtWebEngineScript.ApplicationWorld
+        return QWebEngineScript.ScriptWorldId.ApplicationWorld
     if world == usertypes.JsWorld.user:
-        return QtWebEngineScript.UserWorld
+        return QWebEngineScript.ScriptWorldId.UserWorld
     if world == usertypes.JsWorld.main:
-        return QtWebEngineScript.MainWorld
+        return QWebEngineScript.ScriptWorldId.MainWorld
     raise ValueError(f"Invalid JsWorld: {world!r}")
 
 
 def _convert_usertype_injection_point(injection_point: usertypes.InjectionPoint) -> int:
     """Convert InjectionPoint enum to Qt injection point."""
     mapping = {
-        usertypes.InjectionPoint.deferred: QtWebEngineScript.InjectionPoint.Deferred,
-        usertypes.InjectionPoint.ready: QtWebEngineScript.InjectionPoint.DocumentReady,
-        usertypes.InjectionPoint.creation: QtWebEngineScript.InjectionPoint.DocumentCreation,
+        usertypes.InjectionPoint.deferred: QWebEngineScript.InjectionPoint.Deferred,
+        usertypes.InjectionPoint.ready: QWebEngineScript.InjectionPoint.DocumentReady,
+        usertypes.InjectionPoint.creation: QWebEngineScript.InjectionPoint.DocumentCreation,
     }
     return mapping[injection_point]
 
@@ -1063,7 +1062,7 @@ class _WebEngineScripts(QObject):
         self._widget = cast(webview.WebEngineView, None)
         self._greasemonkey = greasemonkey.gm_manager
         self._dynamic_css: dict[str, str] = OrderedDict()
-        self._web_scripts: dict[str, QtWebEngineScript] = OrderedDict()
+        self._web_scripts: dict[str, QWebEngineScript] = OrderedDict()
 
     def connect_signals(self):
         """Connect signals to our private slots."""
@@ -1282,7 +1281,7 @@ class _WebEngineScripts(QObject):
                        world: usertypes.JsWorld,
                        injection_point: usertypes.InjectionPoint,
                        subframes: bool) -> None:
-        script = QtWebEngineScript()
+        script = QWebEngineScript()
         script.setName(name)
         script.setSourceCode(js_code)
         script.setWorldId(_convert_usertype_world_id(world))
