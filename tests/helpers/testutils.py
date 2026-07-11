@@ -265,6 +265,36 @@ def easyprivacy_txt():
     return _decompress_gzip_datafile("easyprivacy.txt.gz")
 
 
+def ublock_redirect_resources_js():
+    path = os.path.join(abs_datapath(), "ublock", "redirect-resources.js.gz")
+    return gzip.open(path)
+
+
+def ublock_scriptlets_js():
+    path = os.path.join(abs_datapath(), "ublock", "scriptlets.js.gz")
+    return gzip.open(path)
+
+
+def ublock_filters_txt():
+    path = os.path.join(abs_datapath(), "ublock", "filters.txt.gz")
+    return gzip.open(path)
+
+
+def ublock_resource(name):
+    path = os.path.join(abs_datapath(), "ublock", "resources", f"{name}.gz")
+    return gzip.open(path)
+
+
+def ublock_scriptlet_resource(name):
+    path = os.path.join(abs_datapath(), "ublock", "scriptlet-resources", f"{name}.gz")
+    return gzip.open(path)
+
+
+def ublock_resources_cache():
+    path = os.path.join(abs_datapath(), "ublock", "adblock-resources-cache.dat.gz")
+    return gzip.open(path)
+
+
 def _has_qtwebengine() -> bool:
     """Check whether QtWebEngine is available."""
     try:
