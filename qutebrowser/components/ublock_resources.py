@@ -150,6 +150,7 @@ def _parse_resource(
         ".gif": "image/gif",
         ".html": "text/html",
         ".js": "application/javascript",
+        ".json": "application/json",
         ".mp3": "audio/mp3",
         ".mp4": "video/mp4",
         ".png": "image/png",
@@ -169,6 +170,7 @@ def _parse_resource(
         "text/html",
         "text/plain",
         "text/css",
+        "application/json",
     ):
         with io.TextIOWrapper(fileobj, encoding="utf-8") as text_io:
             content = text_io.read().replace("\r", "").encode()
