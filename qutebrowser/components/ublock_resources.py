@@ -231,6 +231,16 @@ def _preprocess_scriptlets_js(content: str) -> str:
 
     js = '\n'.join(filtered)
 
+    # QJSEngine does not support optional catch binding (ES2019).
+    # Replace `catch {` with `catch(e) {` for compatibility.
+    js = re.sub(r'\bcatch\s*\{', 'catch(e) {', js)
+
+    # QJSEngine does not support async/await (ES2017). Strip both keywords.
+    # The QJSEngine is only used for parsing scriptlets to extract function
+    # sources via fn.toString() capture, never for execution — stripping is safe.
+    js = re.sub(r'\basync\s+', '', js)
+    js = re.sub(r'\bawait\s+', '', js)
+
     # Add stubs and hook before the scriptlets.js content
     # Note: we need to hook Array.prototype.push on builtinScriptlets
     stubs = '''
