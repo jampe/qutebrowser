@@ -213,11 +213,19 @@ class BraveAdBlocker:
             # Do nothing if adblocking is disabled for this site.
             return False
 
-        result = self._engine.check_network_urls(
-            request_url.toString(),
-            first_party_url.toString(),
-            _resource_type_to_string(resource_type),
-        )
+        try:
+            result = self._engine.check_network_urls(
+                request_url.toString(),
+                first_party_url.toString(),
+                _resource_type_to_string(resource_type),
+            )
+        except Exception:
+            logger.warning(
+                "Failed to check URL %s (malformed?), not blocking",
+                request_url.toDisplayString(),
+                exc_info=True,
+            )
+            return False
 
         if not result.matched:
             return False
@@ -321,20 +329,11 @@ class BraveAdBlocker:
             )
             try:
                 resources = deserialize_resources_from_file(self._resources_cache_path)
-                for resource in resources:
-                    if adblock.__version__ >= "0.6.0":
-                        self._engine.add_resource(
-                            resource.name,
-                            resource.content_type,
-                            resource.content,
-                            resource.aliases,
-                        )
-                    else:
-                        self._engine.add_resource(
-                            resource.name,
-                            resource.content_type,
-                            resource.content,
-                        )
+                batch = [
+                    (r.name, r.content_type, r.content, r.aliases)
+                    for r in resources
+                ]
+                self._engine.add_resources(batch)
             except DeserializationError:
                 message.error(
                     "Reading adblock resources data failed (corrupted data?). "
@@ -438,16 +437,9 @@ def add_cosmetic_filters(tab: apitypes.Tab, url: QUrl) -> None:
         return
 
     def _make_css(cosmetic_resources: adblock.UrlSpecificResources) -> str:
-        return (
-            "\n".join(
-                f"{sel} {{ display: none !important; }}"
-                for sel in cosmetic_resources.hide_selectors
-            )
-            + "\n"
-            + "\n".join(
-                f"{sel} {{ {';'.join(styles)} }}"
-                for sel, styles in cosmetic_resources.style_selectors.items()
-            )
+        return "\n".join(
+            f"{sel} {{ display: none !important; }}"
+            for sel in cosmetic_resources.hide_selectors
         )
 
     cosmetic_resources = ad_blocker.url_cosmetic_resources(url)
@@ -456,7 +448,7 @@ def add_cosmetic_filters(tab: apitypes.Tab, url: QUrl) -> None:
             f"Returned cosmetic_resources on tab {tab.tab_id} for {url}: "
             "ComseticResource("
             f"num_hide_selectors={len(cosmetic_resources.hide_selectors)}, "
-            f"num_style_selectors={len(cosmetic_resources.style_selectors)}, "
+            f"num_procedural_actions={len(cosmetic_resources.procedural_actions)}, "
             f"num_exceptions={len(cosmetic_resources.exceptions)}, "
             f"len_injected_script={len(cosmetic_resources.injected_script)}, "
             "generichide="

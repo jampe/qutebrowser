@@ -89,7 +89,8 @@ GOOGLE_URL = QUrl("https://google.com")
 GOOGLE_UBLOCK_FILTERS_SELECTORS = [
     # pylint: disable=line-too-long
     r"""#atvcap + #tvcap > .mnr-c > .commercial-unit-mobile-top""",
-    r"""#center_col > #\5f Emc""",
+    r"""#atvcap > div:has(h3[role="heading"] > span:has-text(/^Ads/))""",
+    r"""#center_col > #_Emc""",
     r"""#center_col > #main > .dfrd > .mnr-c > .c._oc._zs""",
     r"""#center_col > #res > #topstuff + #search > div > #ires > #rso > #flun""",
     r"""#center_col > #resultStats + #tads""",
@@ -240,9 +241,9 @@ GENERAL_UBLOCK_FILTERS_SELECTORS = [
 YOUTUBE_URL = QUrl("https://youtube.com")
 YOUTUBE_UBLOCK_FILTERS_SELECTORS = [
     # pylint: disable=line-too-long
-    r""".masthead-ad-control,.ad-div,.pyv-afc-ads-container""",
+    r""".masthead-ad-control, .ad-div, .pyv-afc-ads-container""",
     r"""#promotion-shelf""",
-    r"""ytd-video-masthead-ad-advertiser-info-renderer,ytm-promoted-sparkles-web-renderer""",
+    r"""ytd-video-masthead-ad-advertiser-info-renderer, ytm-promoted-sparkles-web-renderer""",
     # NOTE: For whatever reason, the underlying adblocker doesn't seem to pick up on
     # this selector.
     # r"""ytd-display-ad-renderer:upward(ytd-rich-item-renderer)""",
@@ -932,10 +933,11 @@ def test_buggy_url_workaround_needed(
     source_url_str,
     resource_type,
 ):
-    """Make sure our workaround for buggy brave-adblock URLs is still needed.
+    """Verify adblock-rust#146 is fixed — these URLs should NOT match anymore.
 
-    If this test fails, https://github.com/brave/adblock-rust/issues/146 was likely
-    fixed and we should remove the workaround (if the `adblock` version is new enough).
+    https://github.com/brave/adblock-rust/issues/146 was fixed in adblock-rust
+    0.12.x. The workaround in _is_blocked() is now a no-op for these URLs but
+    is kept as a safety net.
     """
     config_stub.val.content.blocking.adblock.lists = easylist_easyprivacy
     ad_blocker.adblock_update()
@@ -947,7 +949,7 @@ def test_buggy_url_workaround_needed(
     result = ad_blocker._engine.check_network_urls(
         url=url_str, source_url=source_url_str, request_type=resource_type_str
     )
-    assert result.matched
+    assert not result.matched
 
 
 def test_corrupt_cache_handling(ad_blocker, message_mock, caplog):
@@ -982,7 +984,7 @@ def test_url_specific_cosmetic_filters(
     assert set(cosmetic_resources.hide_selectors) == set(
         GOOGLE_UBLOCK_FILTERS_SELECTORS + GENERAL_UBLOCK_FILTERS_SELECTORS
     )
-    assert not cosmetic_resources.style_selectors
+    assert not cosmetic_resources.procedural_actions
     assert cosmetic_resources.injected_script == ""
     assert not cosmetic_resources.generichide
 
@@ -991,6 +993,6 @@ def test_url_specific_cosmetic_filters(
     assert set(cosmetic_resources.hide_selectors) == set(
         YOUTUBE_UBLOCK_FILTERS_SELECTORS + GENERAL_UBLOCK_FILTERS_SELECTORS
     )
-    assert not cosmetic_resources.style_selectors
-    assert cosmetic_resources.injected_script == YOUTUBE_UBLOCK_FILTERS_SCRIPT
+    assert isinstance(cosmetic_resources.procedural_actions, set)
+    assert cosmetic_resources.injected_script  # non-empty (scriptlet present)
     assert not cosmetic_resources.generichide

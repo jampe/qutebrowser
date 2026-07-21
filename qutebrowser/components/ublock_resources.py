@@ -1269,18 +1269,11 @@ def _on_all_resources_downloaded(
 ) -> None:
     """After downloading all resources, create the cache and update the engine."""
     _serialize_resources_to_file(resources, engine_info.resources_cache_path)
-    for resource in resources:
-        if adblock.__version__ >= "0.6.0":
-            engine_info.engine.add_resource(
-                resource.name,
-                resource.content_type,
-                resource.content,
-                resource.aliases,
-            )
-        else:
-            engine_info.engine.add_resource(
-                resource.name, resource.content_type, resource.content
-            )
+    batch = [
+        (r.name, r.content_type, r.content, r.aliases)
+        for r in resources
+    ]
+    engine_info.engine.add_resources(batch)
     engine_info.engine.serialize_to_file(str(engine_info.cache_path))
     redirect_count = done_count - 1  # exclude scriptlets.js from download count
     scriptlet_count = len(resources) - redirect_count
