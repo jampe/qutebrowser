@@ -1106,17 +1106,6 @@ def _extract_fn_source(js_code: str, fn_var: str) -> str | None:
     return None
 
 
-def _resolve_deps(raw_deps: list, fn_to_name: dict[str, str]) -> list[str]:
-    """Resolve dependency entries that may be variable references to string names."""
-    resolved: list[str] = []
-    for dep in raw_deps:
-        if isinstance(dep, str) and dep in fn_to_name:
-            resolved.append(fn_to_name[dep])
-        elif isinstance(dep, str):
-            resolved.append(dep)
-    return resolved
-
-
 def _extract_text_sources(js_code: str) -> dict[str, str]:
     """Extract function/class source for all registered scriptlets from JS text.
 
