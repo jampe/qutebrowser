@@ -5,7 +5,9 @@
 import pathlib
 import logging
 import csv
+import json
 from collections.abc import Iterable
+from unittest.mock import MagicMock
 
 from qutebrowser.qt.core import QUrl
 
@@ -996,3 +998,111 @@ def test_url_specific_cosmetic_filters(
     assert isinstance(cosmetic_resources.procedural_actions, set)
     assert cosmetic_resources.injected_script  # non-empty (scriptlet present)
     assert not cosmetic_resources.generichide
+
+
+def _make_mock_tab(tab_id=0):
+    tab = MagicMock()
+    tab.tab_id = tab_id
+    return tab
+
+
+def test_procedural_injection_when_actions_present(
+    config_stub, ublock_filters, ublock_resources_cache, ad_blocker
+):
+    config_stub.val.content.blocking.adblock.lists = [ublock_filters]
+    config_stub.val.content.blocking.enabled = True
+    config_stub.val.content.blocking.method = "both"
+
+    ad_blocker.adblock_update()
+    ad_blocker.read_resources_cache()
+
+    tab = _make_mock_tab()
+    url = YOUTUBE_URL
+
+    from qutebrowser.components import braveadblock
+    braveadblock.ad_blocker = ad_blocker
+    try:
+        braveadblock.add_cosmetic_filters(tab, url)
+    finally:
+        braveadblock.ad_blocker = None
+
+    add_web_script_calls = {
+        call.args[0]: call
+        for call in tab.add_web_script.call_args_list
+    }
+    assert "adblock_procedural" in add_web_script_calls
+
+
+def test_procedural_injection_skipped_when_actions_empty(
+    config_stub, ublock_filters, ublock_resources_cache, ad_blocker
+):
+    config_stub.val.content.blocking.adblock.lists = [ublock_filters]
+    config_stub.val.content.blocking.enabled = True
+    config_stub.val.content.blocking.method = "both"
+
+    ad_blocker.adblock_update()
+    ad_blocker.read_resources_cache()
+
+    tab = _make_mock_tab()
+    url = GOOGLE_URL
+
+    cosmetic_resources = ad_blocker.url_cosmetic_resources(url)
+    assert cosmetic_resources is not None
+    assert not cosmetic_resources.procedural_actions
+
+    from qutebrowser.components import braveadblock
+    braveadblock.ad_blocker = ad_blocker
+    try:
+        braveadblock.add_cosmetic_filters(tab, url)
+    finally:
+        braveadblock.ad_blocker = None
+
+    add_web_script_names = [call.args[0] for call in tab.add_web_script.call_args_list]
+    assert "adblock_procedural" not in add_web_script_names
+
+
+def test_procedural_bundled_script_contains_engine_and_actions(
+    config_stub, ublock_filters, ublock_resources_cache, ad_blocker
+):
+    config_stub.val.content.blocking.adblock.lists = [ublock_filters]
+    config_stub.val.content.blocking.enabled = True
+    config_stub.val.content.blocking.method = "both"
+
+    ad_blocker.adblock_update()
+    ad_blocker.read_resources_cache()
+
+    cosmetic_resources = ad_blocker.url_cosmetic_resources(YOUTUBE_URL)
+    assert cosmetic_resources is not None
+    assert cosmetic_resources.procedural_actions  # non-empty — else test is vacuous
+
+    tab = _make_mock_tab()
+
+    from qutebrowser.components import braveadblock
+    braveadblock.ad_blocker = ad_blocker
+    try:
+        braveadblock.add_cosmetic_filters(tab, YOUTUBE_URL)
+    finally:
+        braveadblock.ad_blocker = None
+
+    add_web_script_calls = {
+        call.args[0]: call
+        for call in tab.add_web_script.call_args_list
+    }
+    # Assert presence FIRST — all subsequent assertions must not be vacuous.
+    assert "adblock_procedural" in add_web_script_calls
+
+    call = add_web_script_calls["adblock_procedural"]
+    bundled_js = call.args[1]
+    assert "function translateAdblockActions" in bundled_js
+    assert "window._qutebrowser.proceduralFilterer" in bundled_js
+    assert "proceduralFilterer.apply(" in bundled_js
+    assert "function ProceduralFilterer" in bundled_js
+
+    # Every procedural action must be embedded as JSON (would pass with []).
+    for action in cosmetic_resources.procedural_actions:
+        assert json.dumps(action) in bundled_js
+
+    # Injection parameters: main world, DocumentReady, subframes.
+    assert call.kwargs["world"] == usertypes.JsWorld.main
+    assert call.kwargs["injection_point"] == usertypes.InjectionPoint.ready
+    assert call.kwargs["subframes"] is True
