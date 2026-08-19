@@ -260,7 +260,7 @@ def _fetch_submodule_text(filename: str) -> Optional[str]:
         return None
 
 
-def _convert_template_literals(js: str) -> str:
+def _convert_template_literals(js: str) -> str:  # noqa: C901
     """Convert ES2015 template literals to string concatenation for QJSEngine.
 
     Uses a state machine that tracks strings, comments, and regex contexts
@@ -520,7 +520,7 @@ def _strip_class_fields(js: str) -> str:
     return '\n'.join(result)
 
 
-def _strip_module_imports(content: str) -> str:
+def _strip_module_imports(content: str) -> str:  # noqa: C901
     """Strip all ES module import/export statements from a module file.
 
     Removes:
@@ -804,7 +804,7 @@ def _is_regex_start(code: str, slash_pos: int) -> bool:
     return True
 
 
-def _extract_brace_block(code: str, open_pos: int) -> str | None:
+def _extract_brace_block(code: str, open_pos: int) -> str | None:  # noqa: C901
     """Extract a balanced brace ``{...}`` block starting at or before *open_pos*.
 
     Handles strings, regex literals, ``//`` and ``/* */`` comments to avoid
@@ -1064,7 +1064,7 @@ def _extract_fn_source(js_code: str, fn_var: str) -> str | None:
         # const/let/var = (arrow function)
         rf'(?:const|let|var)\s+{re.escape(fn_var)}\s*=\s*\(',
         # const/let/var = (identifier) => (just to find location)
-        rf'(?:const|let|var)\s+{re.escape(fn_var)}\s*=' ,
+        rf'(?:const|let|var)\s+{re.escape(fn_var)}\s*=',
     ]
     for pattern in patterns:
         m = re.search(pattern, js_code)
@@ -1126,9 +1126,6 @@ def _extract_text_sources(js_code: str) -> dict[str, str]:
     registrations = _extract_registrations(js_code)
     if not registrations:
         return {}
-
-    # Build fn_var -> name mapping for dependency resolution
-    fn_to_name = {r['fn_var']: r['name'] for r in registrations}
 
     # Build name -> source mapping
     name_to_source: dict[str, str] = {}
