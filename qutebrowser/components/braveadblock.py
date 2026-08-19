@@ -6,6 +6,7 @@
 
 import dataclasses
 import io
+import json
 import logging
 import pathlib
 import functools
@@ -33,6 +34,7 @@ from qutebrowser.components.ublock_resources import (
 from qutebrowser.components.utils import blockutils
 from qutebrowser.components.utils.exceptions import DeserializationError
 from qutebrowser.utils import (
+    resources,
     usertypes,
     version,
 )  # FIXME: Move needed parts into api namespace?
@@ -483,6 +485,35 @@ def add_cosmetic_filters(tab: apitypes.Tab, url: QUrl) -> None:
             js_code,
             world=usertypes.JsWorld.main,
             injection_point=usertypes.InjectionPoint.creation,
+            subframes=True,
+        )
+
+    # Inject procedural cosmetic filters via JS engine
+    if cosmetic_resources is not None and cosmetic_resources.procedural_actions:
+        actions_list = list(cosmetic_resources.procedural_actions)
+        logger.debug(
+            f"Injecting {len(actions_list)} procedural actions "
+            f"on tab {tab.tab_id}"
+        )
+
+        engine_js = resources.read_file("javascript/procedural-filter.js")
+        actions_json = json.dumps(actions_list)
+
+        bundled_js = (
+            "try {\n"
+            "(function() {\n"
+            f"{engine_js}\n"
+            f"window._qutebrowser.proceduralFilterer.apply({actions_json});\n"
+            "})();\n"
+            "} catch(e) {}\n"
+        )
+
+        tab.remove_web_script("adblock_procedural")
+        tab.add_web_script(
+            "adblock_procedural",
+            bundled_js,
+            world=usertypes.JsWorld.main,
+            injection_point=usertypes.InjectionPoint.ready,
             subframes=True,
         )
 
