@@ -1081,12 +1081,47 @@ class _WebEngineScripts(QObject):
     @pyqtSlot(bool)
     def _update_stylesheet(self, searching=False):
         """Update the custom stylesheet in existing tabs."""
+        css = self._stylesheet_css(searching=searching)
+        # Re-inject the script so the next document deterministically gets the
+        # full css at DocumentCreation (see _inject_stylesheet). This fixes the
+        # set_css() race on pages that load without an early <style> node
+        # (e.g. YouTube): a queued set_css() ran before the module
+        # initialization and the dynamic css was silently lost.
+        self._inject_stylesheet(css)
+        # Apply to the current document when the module is already initialized
+        # (e.g. after load_finished). While a load is in progress the
+        # re-injected script covers the new document, and running set_css()
+        # before module init would only produce a TypeError.
+        code = javascript.assemble('stylesheet', 'set_css', css)
+        self._tab.run_js_async(
+            'if (window._qutebrowser && window._qutebrowser.stylesheet) {\n'
+            + code
+            + '\n}'
+        )
+
+    def _stylesheet_css(self, searching: bool = False) -> str:
+        """Return the full stylesheet css (dynamic css, then user stylesheet)."""
         css = shared.get_user_stylesheet(searching=searching)
         dynamic_css = '\n'.join(self._dynamic_css.values())
         if dynamic_css:
             css = dynamic_css + '\n' + css
-        code = javascript.assemble('stylesheet', 'set_css', css)
-        self._tab.run_js_async(code)
+        return css
+
+    def _inject_stylesheet(self, css: str) -> None:
+        """(Re-)inject the DocumentCreation stylesheet script carrying `css`.
+
+        Embedding the css in the script - instead of only applying it via a
+        later runJavaScript() call - makes it available deterministically at
+        document creation. The script-internal set_css() cannot race because
+        the module is initialized in the same script before the call.
+        """
+        self._remove_js('stylesheet')
+        js_code = javascript.wrap_global(
+            'stylesheet',
+            resources.read_file('javascript/stylesheet.js'),
+            javascript.assemble('stylesheet', 'set_css', css),
+        )
+        self._inject_js('stylesheet', js_code, subframes=True)
 
     def _inject_js(self, name, js_code, *,
                    world=QWebEngineScript.ScriptWorldId.ApplicationWorld,
@@ -1135,16 +1170,9 @@ class _WebEngineScripts(QObject):
         """Initialize custom stylesheets.
 
         Partially inspired by QupZilla:
-        https://github.com/QupZilla/qupzilla/blob/v2.0/src/lib/app/mainapplication.cpp#L1063-L1101
+        https://github.com/QupZilla/qupzilla/blob/v2.0/src/lib/app/mainapplication.cpp#L1061-L1095
         """
-        self._remove_js('stylesheet')
-        css = shared.get_user_stylesheet()
-        js_code = javascript.wrap_global(
-            'stylesheet',
-            resources.read_file('javascript/stylesheet.js'),
-            javascript.assemble('stylesheet', 'set_css', css),
-        )
-        self._inject_js('stylesheet', js_code, subframes=True)
+        self._inject_stylesheet(self._stylesheet_css())
 
     @pyqtSlot()
     def _inject_all_greasemonkey_scripts(self):
