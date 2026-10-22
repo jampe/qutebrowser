@@ -17,9 +17,7 @@
             return 'v' + Math.random().toString(36).slice(2, 10);
         },
         hideStyle: 'display:none!important;',
-        domWatcher: {
-            addListener: function() {}
-        },
+        domWatcher: null, // populated below
         domFilterer: {
             _styleElements: [],
             commit: function(callback) {
@@ -48,6 +46,150 @@
         },
         DOMProceduralFilterer: null
     };
+
+    // --- SafeAnimationFrame --------------------------------------------------
+    // Port of uBlock/src/js/contentscript.js:188-243. Coalesces mutation
+    // bursts into one callback: rAF when available (with a 20s backstop
+    // timeout), or a macro-task timeout for large bursts.
+
+    function SafeAnimationFrame(callback) {
+        this.fid = undefined;
+        this.tid = undefined;
+        this.callback = callback;
+    }
+
+    SafeAnimationFrame.prototype.start = function(delay) {
+        if (delay === undefined) {
+            if (this.fid === undefined && typeof window.requestAnimationFrame === 'function') {
+                this.fid = window.requestAnimationFrame(this.onRAF.bind(this));
+            }
+            if (this.tid === undefined) {
+                this.tid = window.setTimeout(this.onSTO.bind(this), 20000);
+            }
+            return;
+        }
+        if (this.fid === undefined && this.tid === undefined) {
+            this.tid = window.setTimeout(this.macroToMicro.bind(this), delay);
+        }
+    };
+
+    SafeAnimationFrame.prototype.clear = function() {
+        if (this.fid !== undefined) {
+            window.cancelAnimationFrame(this.fid);
+            this.fid = undefined;
+        }
+        if (this.tid !== undefined) {
+            window.clearTimeout(this.tid);
+            this.tid = undefined;
+        }
+    };
+
+    SafeAnimationFrame.prototype.macroToMicro = function() {
+        this.tid = undefined;
+        this.start();
+    };
+
+    SafeAnimationFrame.prototype.onRAF = function() {
+        if (this.tid !== undefined) {
+            window.clearTimeout(this.tid);
+            this.tid = undefined;
+        }
+        this.fid = undefined;
+        this.callback();
+    };
+
+    SafeAnimationFrame.prototype.onSTO = function() {
+        if (this.fid !== undefined) {
+            window.cancelAnimationFrame(this.fid);
+            this.fid = undefined;
+        }
+        this.tid = undefined;
+        this.callback();
+    };
+
+    // --- vAPI.domWatcher -----------------------------------------------------
+    // Port of uBlock/src/js/contentscript.js:318-455. Document-wide childList
+    // observer; mutations are processed outside the observer callback.
+
+    vAPI.domWatcher = (function() {
+        var addedNodeLists = [];
+        var removedNodeLists = [];
+        var addedNodes = [];
+        var ignoreTags = { br: true, head: true, link: true, meta: true, script: true, style: true };
+        var listeners = [];
+        var domLayoutObserver;
+        var safeObserverHandlerTimer;
+
+        var safeObserverHandler = function() {
+            var i = addedNodeLists.length;
+            while (i--) {
+                var nodeList = addedNodeLists[i];
+                var iNode = nodeList.length;
+                while (iNode--) {
+                    var node = nodeList[iNode];
+                    if (node.nodeType !== 1) { continue; }
+                    if (ignoreTags[node.localName] === true) { continue; }
+                    if (node.parentElement === null) { continue; }
+                    addedNodes.push(node);
+                }
+            }
+            addedNodeLists.length = 0;
+            i = removedNodeLists.length;
+            var removedNodes = false;
+            while (i-- && removedNodes === false) {
+                var rnodeList = removedNodeLists[i];
+                var riNode = rnodeList.length;
+                while (riNode--) {
+                    if (rnodeList[riNode].nodeType !== 1) { continue; }
+                    removedNodes = true;
+                    break;
+                }
+            }
+            removedNodeLists.length = 0;
+            if (addedNodes.length === 0 && removedNodes === false) { return; }
+            var li = 0;
+            for (; li < listeners.length; li++) {
+                try {
+                    listeners[li].onDOMChanged(addedNodes, removedNodes);
+                } catch (e) {}
+            }
+            addedNodes.length = 0;
+        };
+
+        // Do NOT handle nodes directly inside the MutationObserver callback
+        // (uBlock chrisaljoudi#205): always defer through SafeAnimationFrame.
+        var observerHandler = function(mutations) {
+            var i = mutations.length;
+            while (i--) {
+                var mutation = mutations[i];
+                if (mutation.addedNodes.length !== 0) {
+                    addedNodeLists.push(mutation.addedNodes);
+                }
+                if (mutation.removedNodes.length !== 0) {
+                    removedNodeLists.push(mutation.removedNodes);
+                }
+            }
+            if (addedNodeLists.length !== 0 || removedNodeLists.length !== 0) {
+                safeObserverHandlerTimer.start(addedNodeLists.length < 100 ? 1 : undefined);
+            }
+        };
+
+        var startMutationObserver = function() {
+            if (domLayoutObserver !== undefined) { return; }
+            domLayoutObserver = new MutationObserver(observerHandler);
+            domLayoutObserver.observe(document, { childList: true, subtree: true });
+            safeObserverHandlerTimer = new SafeAnimationFrame(safeObserverHandler);
+        };
+
+        var addListener = function(listener) {
+            if (listeners.indexOf(listener) !== -1) { return; }
+            listeners.push(listener);
+            startMutationObserver();
+            try { listener.onDOMCreated(); } catch (e) {}
+        };
+
+        return { addListener: addListener };
+    })();
 
     // --- Helpers -------------------------------------------------------------
 
@@ -935,8 +1077,11 @@
                     var translated = translateAdblockActions(actionsJSON);
                     if (translated.length === 0) { return 0; }
 
-                    var filterer = new ProceduralFilterer(vAPI.domFilterer);
-                    vAPI.domFilterer.proceduralFilterer = filterer;
+                    var filterer = vAPI.domFilterer.proceduralFilterer;
+                    if (!(filterer instanceof ProceduralFilterer)) {
+                        filterer = new ProceduralFilterer(vAPI.domFilterer);
+                        vAPI.domFilterer.proceduralFilterer = filterer;
+                    }
 
                     filterer.addProceduralSelectors(translated);
 
