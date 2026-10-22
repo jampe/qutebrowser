@@ -12,10 +12,12 @@ import pathlib
 import functools
 import contextlib
 import subprocess
+import time
+import weakref
 from typing import Optional, IO, List, Set, Dict, Any
 from collections.abc import Iterator
 
-from qutebrowser.qt.core import QUrl
+from qutebrowser.qt.core import QTimer, QUrl
 
 from qutebrowser.api import (
     hook,
@@ -146,6 +148,110 @@ class _CosmeticInfo:
     generichide: bool
 
 
+@dataclasses.dataclass
+class _SurveyorState:
+    """Per-tab state for continuous generic cosmetic filtering."""
+
+    tab_ref: "weakref.ReferenceType[apitypes.Tab]"
+    exceptions: Set[str]
+    selectors: Set[str] = dataclasses.field(default_factory=set)
+    draining: bool = False
+    drain_started: Optional[float] = None
+
+
+_SURVEYOR_INTERVAL_MS = 1000
+_SURVEYOR_DRAIN_TIMEOUT_S = 5.0
+
+_SURVEYOR_DRAIN_JS = """(function() {
+    if (!window._qutebrowser || !window._qutebrowser.domSurveyor) {
+        return null;
+    }
+    return window._qutebrowser.domSurveyor.drain();
+})()"""
+
+_surveyor_timer: Optional[QTimer] = None
+
+
+def _ensure_surveyor_timer() -> None:
+    """Start the generic-filter surveyor poll timer if needed."""
+    global _surveyor_timer
+    if _surveyor_timer is None:
+        _surveyor_timer = QTimer()
+        _surveyor_timer.setInterval(_SURVEYOR_INTERVAL_MS)
+        _surveyor_timer.timeout.connect(_drain_surveyors)
+    if not _surveyor_timer.isActive():
+        _surveyor_timer.start()
+
+
+def _drain_surveyors() -> None:
+    """Poll all registered pages for newly added class/id tokens."""
+    if ad_blocker is None:
+        return
+    for tab_id, state in list(ad_blocker.surveyors.items()):
+        tab = state.tab_ref()
+        if tab is None:
+            ad_blocker.surveyors.pop(tab_id, None)
+            continue
+        _drain_surveyor(tab, state)
+    if not ad_blocker.surveyors and _surveyor_timer is not None:
+        _surveyor_timer.stop()
+
+
+def _drain_surveyor(tab: apitypes.Tab, state: _SurveyorState) -> None:
+    """Ask the page's surveyor for newly seen class/id tokens."""
+    if state.draining:
+        if (state.drain_started is not None
+                and time.monotonic() - state.drain_started
+                < _SURVEYOR_DRAIN_TIMEOUT_S):
+            return
+        # Renderer crashed or never answered; retry the drain.
+    state.draining = True
+    state.drain_started = time.monotonic()
+    tab.run_js_async(
+        _SURVEYOR_DRAIN_JS,
+        functools.partial(_on_survey_result, tab.tab_id, state),
+        world=usertypes.JsWorld.main,
+        name="adblock_surveyor",
+    )
+
+
+def _on_survey_result(
+    tab_id: int, state: _SurveyorState, data: Any
+) -> None:
+    """Query the engine for new tokens and extend the generic CSS."""
+    state.draining = False
+    state.drain_started = None
+    if ad_blocker is None or ad_blocker.surveyors.get(tab_id) is not state:
+        return
+    if not isinstance(data, dict):
+        return
+    classes = [c for c in data.get("classes") or [] if isinstance(c, str)]
+    ids = [i for i in data.get("ids") or [] if isinstance(i, str)]
+    if not classes and not ids:
+        return
+    selectors = ad_blocker.hidden_class_id_selectors(
+        classes, ids, state.exceptions
+    )
+    if not selectors:
+        return
+    new_selectors = set(selectors) - state.selectors
+    if not new_selectors:
+        return
+    state.selectors |= new_selectors
+    logger.debug(
+        "Generic css selectors on tab %d: %d new (%d total)",
+        tab_id, len(new_selectors), len(state.selectors),
+    )
+    tab = state.tab_ref()
+    if tab is None:
+        return
+    css = "\n".join(
+        f"{sel} {{ display: none !important; }}"
+        for sel in sorted(state.selectors)
+    )
+    tab.add_dynamic_css("adblock_generic", css)
+
+
 class BraveAdBlocker:
 
     """Manage blocked hosts based on Brave's adblocker.
@@ -156,6 +262,7 @@ class BraveAdBlocker:
         _cache_path: The path of the adblock engine cache file
         _resources_cache_path: The path to the cached resources
         cosmetic_map: Maps tabs to the cosmetic filtering information they need
+        surveyors: Maps tabs to their generic-filter surveyor state
         _engine: Brave ad-blocking engine.
     """
 
@@ -165,6 +272,7 @@ class BraveAdBlocker:
         self._cache_path = data_dir / "adblock-cache.dat"
         self._resources_cache_path = data_dir / "adblock-resources-cache.dat"
         self.cosmetic_map: Dict[int, _CosmeticInfo] = {}
+        self.surveyors: Dict[int, _SurveyorState] = {}
         try:
             self._engine = adblock.Engine(adblock.FilterSet())
         except AttributeError:
@@ -520,7 +628,7 @@ def add_cosmetic_filters(tab: apitypes.Tab, url: QUrl) -> None:
 
 @hook.load_finished()
 def update_cosmetic_filters(tab: apitypes.Tab, ok: bool) -> None:
-    """After loading a page, search for all classes and ids for generic selectors."""
+    """After loading a page, start scanning for generic selectors."""
     if ad_blocker is None or not ok:
         return
 
@@ -539,55 +647,28 @@ def update_cosmetic_filters(tab: apitypes.Tab, ok: bool) -> None:
     if cosmetic_info.generichide:
         return
 
-    js_code = """{
-let classes = new Set();
-let ids = new Set();
-const walker = document.createTreeWalker(document.body);
-let node;
-while (node = walker.nextNode()) {
-    if (node.className) {
-        classes.add(node.className.toString());
-    }
-    if (node.id) {
-        ids.add(node.id.toString());
-    }
-}
-({"classes": Array.from(classes), "ids": Array.from(ids)})
-}
-"""
-
-    url = tab.url()
-
-    def _hidden_class_id_selectors_cb(data: Any) -> None:
-        logger.debug(
-            f"hidden_class_id_selectors_cb called on tab {tab.tab_id} for {url} "
-            f"with data type: {type(data)}"
-        )
-        if data is None:
-            return
-
-        assert isinstance(data, dict)
-        assert "classes" in data
-        assert "ids" in data
-
-        selectors = ad_blocker.hidden_class_id_selectors(
-            data["classes"], data["ids"], cosmetic_info.exceptions
-        )
-        if not selectors:
-            return
-
-        logger.debug(f"Number generic selectors: {len(selectors)}")
-
-        css = "\n".join(f"{sel} {{ display: none !important; }}" for sel in selectors)
-        num_css_lines = css.count("\n")
-        logger.debug(
-            f"Generic css on tab {tab.tab_id} for {url}: " f"num_lines={num_css_lines}"
-        )
-        tab.add_dynamic_css("adblock_generic", css)
-
-    tab.run_js_async(
-        js_code, callback=_hidden_class_id_selectors_cb, name="adblock_generic"
+    state = _SurveyorState(
+        tab_ref=weakref.ref(tab), exceptions=cosmetic_info.exceptions
     )
+    ad_blocker.surveyors[tab.tab_id] = state
+
+    # No web-script API here: remove_web_script() does not remove scripts from
+    # the page collection, and run_js_async targets the loaded document.
+    tab.run_js_async(
+        resources.read_file("javascript/dom-surveyor.js"),
+        world=usertypes.JsWorld.main,
+        name="adblock_surveyor",
+    )
+    _ensure_surveyor_timer()
+    _drain_surveyor(tab, state)
+
+
+@hook.load_started()
+def reset_surveyor(tab: apitypes.Tab) -> None:
+    """Drop the previous document's generic-filter surveyor state."""
+    if ad_blocker is None:
+        return
+    ad_blocker.surveyors.pop(tab.tab_id, None)
 
 
 @hook.init()

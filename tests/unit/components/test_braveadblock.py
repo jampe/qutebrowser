@@ -6,7 +6,10 @@ import pathlib
 import logging
 import csv
 import json
+import time
+import weakref
 from collections.abc import Iterable
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from qutebrowser.qt.core import QUrl
@@ -1106,3 +1109,189 @@ def test_procedural_bundled_script_contains_engine_and_actions(
     assert call.kwargs["world"] == usertypes.JsWorld.main
     assert call.kwargs["injection_point"] == usertypes.InjectionPoint.ready
     assert call.kwargs["subframes"] is True
+
+
+# --- Step 5: continuous generic class/id surveyor -------------------------
+
+
+@pytest.fixture
+def surveyor():
+    """Wire a mock ad blocker into the module-level surveyor code."""
+    blocker = MagicMock()
+    blocker.cosmetic_map = {}
+    blocker.surveyors = {}
+    blocker.hidden_class_id_selectors = MagicMock(return_value=[".ad-banner"])
+    old_blocker = braveadblock.ad_blocker
+    braveadblock.ad_blocker = blocker
+    try:
+        yield blocker
+    finally:
+        braveadblock.ad_blocker = old_blocker
+        if braveadblock._surveyor_timer is not None:
+            braveadblock._surveyor_timer.stop()
+            braveadblock._surveyor_timer = None
+
+
+def _make_js_tab(tab_id=0, drain_result=None):
+    tab = MagicMock()
+    tab.tab_id = tab_id
+    tab.url.return_value = QUrl("https://example.com")
+
+    def run_js_async(code, callback=None, **kwargs):
+        if callback is not None:
+            callback(drain_result)
+
+    tab.run_js_async.side_effect = run_js_async
+    return tab
+
+
+class _WeakrefableTab:
+
+    """Minimal weakref-able stand-in for a tab in cleanup tests."""
+
+
+def _make_state(tab=None, *, exceptions=None, **kwargs):
+    if tab is None:
+        tab = MagicMock()
+    return braveadblock._SurveyorState(
+        tab_ref=weakref.ref(tab),
+        exceptions=set() if exceptions is None else exceptions,
+        **kwargs,
+    )
+
+
+def test_surveyor_initial_drain(surveyor):
+    surveyor.cosmetic_map[0] = braveadblock._CosmeticInfo(set(), False)
+    tab = _make_js_tab(drain_result={"classes": ["ad-banner"], "ids": []})
+
+    braveadblock.update_cosmetic_filters(tab, ok=True)
+
+    assert 0 in surveyor.surveyors
+    assert tab.run_js_async.call_count == 2
+
+    inject_call, drain_call = tab.run_js_async.call_args_list
+    assert inject_call.kwargs == {
+        "world": usertypes.JsWorld.main,
+        "name": "adblock_surveyor",
+    }
+    assert "window._qutebrowser.domSurveyor" in inject_call.args[0]
+    assert drain_call.args[1] is not None
+    assert drain_call.kwargs == {
+        "world": usertypes.JsWorld.main,
+        "name": "adblock_surveyor",
+    }
+
+    tab.add_dynamic_css.assert_called_once_with(
+        "adblock_generic", ".ad-banner { display: none !important; }"
+    )
+    surveyor.hidden_class_id_selectors.assert_called_once_with(
+        ["ad-banner"], [], set()
+    )
+
+
+def test_surveyor_accumulates_selectors(surveyor):
+    surveyor.cosmetic_map[0] = braveadblock._CosmeticInfo(set(), False)
+    tab = _make_js_tab(drain_result={"classes": ["ad-banner"], "ids": []})
+    braveadblock.update_cosmetic_filters(tab, ok=True)
+
+    state = surveyor.surveyors[0]
+    surveyor.hidden_class_id_selectors.return_value = [".ad-slot"]
+    braveadblock._on_survey_result(0, state, {"classes": ["ad-slot"], "ids": []})
+
+    assert tab.add_dynamic_css.call_count == 2
+    css = tab.add_dynamic_css.call_args.args[1]
+    assert css == (
+        ".ad-banner { display: none !important; }\n"
+        ".ad-slot { display: none !important; }"
+    )
+
+
+def test_surveyor_skipped_for_generichide(surveyor):
+    surveyor.cosmetic_map[0] = braveadblock._CosmeticInfo(set(), True)
+    tab = _make_js_tab()
+
+    braveadblock.update_cosmetic_filters(tab, ok=True)
+
+    assert not surveyor.surveyors
+    tab.run_js_async.assert_not_called()
+    tab.add_dynamic_css.assert_not_called()
+
+
+def test_surveyor_passes_exceptions(surveyor):
+    exceptions = {".ad-banner"}
+    surveyor.cosmetic_map[0] = braveadblock._CosmeticInfo(exceptions, False)
+    tab = _make_js_tab(
+        drain_result={"classes": ["ad-banner"], "ids": ["ad-id"]}
+    )
+
+    braveadblock.update_cosmetic_filters(tab, ok=True)
+
+    surveyor.hidden_class_id_selectors.assert_called_once_with(
+        ["ad-banner"], ["ad-id"], exceptions
+    )
+
+
+def test_add_cosmetic_filters_keeps_surveyor_state(surveyor):
+    """Subframe before_load navigations must not reset the surveyor."""
+    state = _make_state()
+    surveyor.surveyors[0] = state
+    surveyor.url_cosmetic_resources.return_value = SimpleNamespace(
+        hide_selectors=[],
+        procedural_actions=set(),
+        exceptions=set(),
+        injected_script="",
+        generichide=False,
+    )
+    tab = _make_js_tab()
+
+    braveadblock.add_cosmetic_filters(tab, QUrl("https://example.com"))
+
+    assert surveyor.surveyors.get(0) is state
+
+
+def test_reset_surveyor(surveyor):
+    surveyor.surveyors[0] = _make_state()
+    braveadblock._ensure_surveyor_timer()
+    assert braveadblock._surveyor_timer.isActive()
+
+    braveadblock.reset_surveyor(_make_js_tab())
+    braveadblock._drain_surveyors()
+
+    assert not surveyor.surveyors
+    assert not braveadblock._surveyor_timer.isActive()
+
+
+def test_surveyor_dead_tab_cleanup(surveyor):
+    dead_tab = _WeakrefableTab()
+    state = _make_state(tab=dead_tab)
+    del dead_tab
+    surveyor.surveyors[0] = state
+    braveadblock._ensure_surveyor_timer()
+
+    braveadblock._drain_surveyors()
+
+    assert not surveyor.surveyors
+    assert not braveadblock._surveyor_timer.isActive()
+
+
+def test_surveyor_retries_stuck_drain(surveyor):
+    tab = MagicMock()
+    tab.tab_id = 0
+    state = _make_state(
+        tab=tab,
+        draining=True,
+        drain_started=time.monotonic() - 10,
+    )
+    braveadblock._drain_surveyor(tab, state)
+    assert tab.run_js_async.call_count == 1
+    assert state.draining
+
+    fresh_tab = MagicMock()
+    fresh_tab.tab_id = 0
+    fresh_state = _make_state(
+        tab=fresh_tab,
+        draining=True,
+        drain_started=time.monotonic(),
+    )
+    braveadblock._drain_surveyor(fresh_tab, fresh_state)
+    fresh_tab.run_js_async.assert_not_called()
