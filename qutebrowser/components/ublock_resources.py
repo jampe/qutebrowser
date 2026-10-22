@@ -48,6 +48,7 @@ class Resource:
     aliases: List[str]
     content_type: str
     content: str
+    dependencies: List[str] = dataclasses.field(default_factory=list)
 
 
 class ScriptletBridge(QObject):
@@ -57,8 +58,10 @@ class ScriptletBridge(QObject):
         super().__init__(parent=engine)
         self.resources: list[Resource] = []
 
-    @pyqtSlot(str, 'QJSValue')
-    def registerScriptlet(self, name: str, fn: QJSValue) -> None:
+    @pyqtSlot(str, 'QJSValue', 'QJSValue')
+    def registerScriptlet(
+        self, name: str, fn: QJSValue, dependencies: QJSValue
+    ) -> None:
         """Called from JS when builtinScriptlets.push() is called.
 
         fn is a QJSValue holding a JavaScript function.
@@ -67,12 +70,18 @@ class ScriptletBridge(QObject):
         source = fn.toString()
         if not source:
             return
+        dep_list: list[str] = (
+            dependencies.toVariant()
+            if not dependencies.isUndefined() and not dependencies.isNull()
+            else []
+        )
         content = base64.b64encode(source.encode()).decode("utf-8")
         self.resources.append(Resource(
             name=name,
             aliases=[],
             content_type="application/javascript",
             content=content,
+            dependencies=[d for d in dep_list if isinstance(d, str)],
         ))
 
     @pyqtSlot(str, 'QJSValue')
@@ -139,7 +148,10 @@ def deserialize_resources_from_file(path: pathlib.Path) -> List[Resource]:
             # pyserde) instead of doing this manually like this
             resources = json.load(f)
             return [
-                Resource(d["name"], d["aliases"], d["content_type"], d["content"])
+                Resource(
+                    d["name"], d["aliases"], d["content_type"], d["content"],
+                    d.get("dependencies", []),
+                )
                 for d in resources
             ]
         except (TypeError, KeyError):
@@ -724,7 +736,7 @@ function registerScriptlet(fn, details) {
 const _origScriptletPush = registeredScriptlets.push;
 registeredScriptlets.push = function(item) {
     if (item && typeof item === 'object' && item.name && item.fn) {
-        Bridge.registerScriptlet(item.name, item.fn);
+        Bridge.registerScriptlet(item.name, item.fn, item.dependencies || []);
         if (item.aliases) {
             Bridge.registerAliases(item.name, item.aliases);
         }
@@ -734,7 +746,7 @@ registeredScriptlets.push = function(item) {
 
 builtinScriptlets.push = function(item) {
     if (item && typeof item === 'object' && item.name && item.fn) {
-        Bridge.registerScriptlet(item.name, item.fn);
+        Bridge.registerScriptlet(item.name, item.fn, item.dependencies || []);
         if (item.aliases) {
             Bridge.registerAliases(item.name, item.aliases);
         }
@@ -1053,6 +1065,11 @@ def _extract_fn_source(js_code: str, fn_var: str) -> str | None:
       class <fn_var> { ... }
       const <fn_var> = function(...
       const <fn_var> = ( ... ) =>
+
+    Top-level declarations (no leading whitespace) are preferred: scripts can
+    contain nested functions with the same name (e.g. setConstant inside
+    setConstantFn), and picking those produces resources with the wrong
+    signature. The unanchored search is a fallback for unusual formatting.
     """
     patterns = [
         # function declaration
@@ -1066,43 +1083,122 @@ def _extract_fn_source(js_code: str, fn_var: str) -> str | None:
         # const/let/var = (identifier) => (just to find location)
         rf'(?:const|let|var)\s+{re.escape(fn_var)}\s*=',
     ]
-    for pattern in patterns:
-        m = re.search(pattern, js_code)
-        if m:
-            start = m.start()
-            # Find the opening brace of the body
-            if 'function' in pattern or 'class' in pattern:
-                # After the function/class keyword, find the opening paren then brace
-                body_start = js_code.index(m.group(), start) + len(m.group())
-                # Find opening brace
-                brace_pos = js_code.find('{', body_start)
-                if brace_pos == -1:
-                    continue
-                block = _extract_brace_block(js_code, brace_pos)
-                if block:
-                    # Return everything from function/class keyword to end of block
-                    return js_code[start:brace_pos + len(block)]
-            elif '=>' in pattern:
-                # Arrow function
-                body_start = m.end()
-                brace_pos = js_code.find('{', body_start)
-                if brace_pos == -1:
-                    continue
-                block = _extract_brace_block(js_code, brace_pos)
-                if block:
-                    return js_code[start:brace_pos + len(block)]
-            else:
-                # General expression assignment
-                after_eq = js_code[m.end():]
-                stripped = after_eq.lstrip()
-                if stripped.startswith('function') or stripped.startswith('async function') or stripped.startswith('class'):
-                    body_start = m.end() + (len(after_eq) - len(stripped))
-                    brace_pos = js_code.find('{', body_start)
-                    if brace_pos == -1:
-                        continue
-                    block = _extract_brace_block(js_code, brace_pos)
-                    if block:
-                        return js_code[start:brace_pos + len(block)]
+    for anchored in (True, False):
+        for pattern in patterns:
+            effective = '(?m)^' + pattern if anchored else pattern
+            m = re.search(effective, js_code)
+            if m is None:
+                continue
+            source = _extract_source_at_match(js_code, m, pattern)
+            if source is not None:
+                return source
+    return None
+
+
+def _find_matching_paren(code: str, open_pos: int) -> int:  # noqa: C901
+    """Return the index of the ')' matching the '(' at *open_pos*, or -1.
+
+    Skips strings and comments so parentheses inside default values cannot
+    confuse the parameter list scan.
+    """
+    depth = 0
+    in_string = False
+    string_char = ''
+    in_line_comment = False
+    in_block_comment = False
+    pos = open_pos
+    while pos < len(code):
+        ch = code[pos]
+        if in_line_comment:
+            if ch == '\n':
+                in_line_comment = False
+            pos += 1
+            continue
+        if in_block_comment:
+            if ch == '*' and pos + 1 < len(code) and code[pos + 1] == '/':
+                in_block_comment = False
+                pos += 2
+                continue
+            pos += 1
+            continue
+        if in_string:
+            if ch == '\\':
+                pos += 2
+                continue
+            if ch == string_char:
+                in_string = False
+            pos += 1
+            continue
+        if ch == '/' and pos + 1 < len(code) and code[pos + 1] == '/':
+            in_line_comment = True
+            pos += 2
+            continue
+        if ch == '/' and pos + 1 < len(code) and code[pos + 1] == '*':
+            in_block_comment = True
+            pos += 2
+            continue
+        if ch in ('"', "'", '`'):
+            in_string = True
+            string_char = ch
+        elif ch == '(':
+            depth += 1
+        elif ch == ')':
+            depth -= 1
+            if depth == 0:
+                return pos
+        pos += 1
+    return -1
+
+
+def _extract_source_at_match(  # noqa: C901
+    js_code: str, m: re.Match, pattern: str
+) -> str | None:
+    """Return the source starting at a pattern match, or None."""
+    start = m.start()
+    # Find the opening brace of the body
+    if 'function' in pattern or 'class' in pattern:
+        # After the function/class keyword, find the opening paren then brace
+        body_start = js_code.index(m.group(), start) + len(m.group())
+        if 'function' in pattern:
+            # Skip the parameter list: a default value like `options = {}`
+            # must not be mistaken for the body.
+            paren_pos = (body_start - 1 if js_code[body_start - 1] == '('
+                         else js_code.find('(', body_start))
+            if paren_pos == -1:
+                return None
+            paren_end = _find_matching_paren(js_code, paren_pos)
+            if paren_end == -1:
+                return None
+            brace_pos = js_code.find('{', paren_end)
+        else:
+            brace_pos = js_code.find('{', body_start)
+        if brace_pos == -1:
+            return None
+        block = _extract_brace_block(js_code, brace_pos)
+        if block:
+            # Return everything from function/class keyword to end of block
+            return js_code[start:brace_pos + len(block)]
+    elif '=>' in pattern:
+        # Arrow function
+        body_start = m.end()
+        brace_pos = js_code.find('{', body_start)
+        if brace_pos == -1:
+            return None
+        block = _extract_brace_block(js_code, brace_pos)
+        if block:
+            return js_code[start:brace_pos + len(block)]
+    else:
+        # General expression assignment
+        after_eq = js_code[m.end():]
+        stripped = after_eq.lstrip()
+        if stripped.startswith('function') or stripped.startswith('async function') or stripped.startswith('class'):
+            body_start = m.end() + (len(after_eq) - len(stripped))
+            brace_pos = js_code.find('{', body_start)
+            if brace_pos == -1:
+                return None
+            block = _extract_brace_block(js_code, brace_pos)
+            if block:
+                return js_code[start:brace_pos + len(block)]
     return None
 
 
@@ -1168,6 +1264,18 @@ def _parse_scriptlets_qjs(content: str) -> list[Resource]:
             if r.name in text_sources:
                 source_text = text_sources[r.name]
                 r.content = base64.b64encode(source_text.encode()).decode("utf-8")
+
+        # uBO defines `scriptletGlobals` in its scriptlet executor. adblock-rust
+        # concatenates resources without it, but safe-self.js reads it, so embed
+        # a minimal object in the resource that needs it.
+        for r in resources:
+            if r.name == "safe-self.fn":
+                source_text = base64.b64decode(r.content).decode("utf-8")
+                r.content = base64.b64encode(
+                    ("var scriptletGlobals = window.scriptletGlobals || {};\n"
+                     + source_text).encode()
+                ).decode("utf-8")
+                break
 
         return resources
 
@@ -1256,7 +1364,7 @@ def _on_all_resources_downloaded(
     """After downloading all resources, create the cache and update the engine."""
     _serialize_resources_to_file(resources, engine_info.resources_cache_path)
     batch = [
-        (r.name, r.content_type, r.content, r.aliases)
+        (r.name, r.content_type, r.content, r.aliases, r.dependencies)
         for r in resources
     ]
     engine_info.engine.add_resources(batch)

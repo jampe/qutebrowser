@@ -1295,3 +1295,30 @@ def test_surveyor_retries_stuck_drain(surveyor):
     )
     braveadblock._drain_surveyor(fresh_tab, fresh_state)
     fresh_tab.run_js_async.assert_not_called()
+
+
+def test_injected_script_has_dependencies(
+    config_stub, ublock_resources_cache, ad_blocker, tmp_path
+):
+    """Scriptlet resources include their helper functions."""
+    filter_path = tmp_path / "filters.txt"
+    filter_path.write_text("example.com##+js(set-constant, adblockTest, 42)\n")
+
+    config_stub.val.content.blocking.adblock.lists = [filter_path.as_uri()]
+    config_stub.val.content.blocking.enabled = True
+    config_stub.val.content.blocking.method = "both"
+
+    ad_blocker.adblock_update()
+
+    resources = ad_blocker.url_cosmetic_resources(QUrl("https://example.com/"))
+    assert resources is not None
+    script = resources.injected_script
+    assert script  # non-empty — otherwise the rest is vacuous
+    for marker in [
+        "function safeSelf(",
+        "function runAt(",
+        "function setConstantFn(",
+        "function validateConstantFn(",
+    ]:
+        assert marker in script
+    assert 'setConstant("adblockTest", "42")' in script
