@@ -103,7 +103,7 @@ window._qutebrowser.stylesheet = (function() {
         style_observer.observe(document, {"childList": true, "subtree": true});
     }
 
-    funcs.set_css = function(css, debug = false) {
+    funcs.set_css = function(css, debug = false, propagate = true) {
         if (!initialized) {
             init();
         }
@@ -119,7 +119,13 @@ window._qutebrowser.stylesheet = (function() {
         } else {
             css_content = css;
         }
-        // Propagate the new CSS to all child frames.
+        // Propagate the new CSS to all same-origin child frames. This is only
+        // a fallback for Qt versions without QWebEngineFrame; newer versions
+        // apply the stylesheet per frame from Python, which also covers
+        // cross-origin frames.
+        if (!propagate) {
+            return;
+        }
         for (let i = 0; i < window.frames.length; ++i) {
             const frame = window.frames[i];
             try {
@@ -128,7 +134,7 @@ window._qutebrowser.stylesheet = (function() {
                 }
             } catch (exc) {
                 if (exc instanceof DOMException && exc.name === "SecurityError") {
-                    // FIXME:qtwebengine This does not work for cross-origin frames.
+                    // Older Qt: cross-origin frames cannot be reached here.
                     console.log(`Failed to style frame: ${exc.message}`);
                 } else {
                     throw exc;

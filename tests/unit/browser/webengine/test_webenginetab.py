@@ -14,7 +14,7 @@ QWebEngineScriptCollection = QtWebEngineCore.QWebEngineScriptCollection
 QWebEngineScript = QtWebEngineCore.QWebEngineScript
 
 from qutebrowser.browser import greasemonkey
-from qutebrowser.utils import usertypes
+from qutebrowser.utils import javascript, usertypes
 webenginetab = pytest.importorskip(
     "qutebrowser.browser.webengine.webenginetab")
 
@@ -244,3 +244,61 @@ class TestWebEnginePermissions:
             pytest.skip("enum member not available")
         assert clipboard in permissions_cls._options
         assert clipboard in permissions_cls._messages
+
+
+class _FakeFrame:
+
+    """Minimal QWebEngineFrame stand-in."""
+
+    def __init__(self, *, valid=True, children=()):
+        self._valid = valid
+        self._children = list(children)
+        self.calls = []
+
+    def isValid(self):
+        return self._valid
+
+    def children(self):
+        return self._children
+
+    def runJavaScript(self, code, world_id):
+        self.calls.append((code, world_id))
+
+
+class _FakePage:
+
+    """Minimal QWebEnginePage stand-in for mainFrame()."""
+
+    def __init__(self, main_frame):
+        self._main_frame = main_frame
+
+    def mainFrame(self):
+        return self._main_frame
+
+
+def test_apply_stylesheet_to_all_frames():
+    grandchild = _FakeFrame()
+    child = _FakeFrame(children=[grandchild])
+    invalid = _FakeFrame(valid=False)
+    main_frame = _FakeFrame(children=[child, invalid])
+
+    applied = webenginetab._apply_stylesheet_to_frames(
+        _FakePage(main_frame), "body { color: red; }")
+
+    assert applied
+    world_id = int(QWebEngineScript.ScriptWorldId.ApplicationWorld)
+    assert len(main_frame.calls) == 1
+    assert main_frame.calls == child.calls == grandchild.calls
+    code, frame_world = main_frame.calls[0]
+    assert frame_world == world_id
+    # The module is installed on demand (cross-origin frames can miss the
+    # DocumentCreation script), then set_css runs without propagation.
+    assert "window._qutebrowser.stylesheet = " in code
+    assert javascript.assemble('stylesheet', 'set_css',
+                               "body { color: red; }", False, False) in code
+    assert invalid.calls == []
+
+
+def test_apply_stylesheet_without_frame_api():
+    """Qt < 6.8 has no QWebEngineFrame; caller must fall back."""
+    assert not webenginetab._apply_stylesheet_to_frames(object(), "css")
