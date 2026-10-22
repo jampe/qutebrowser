@@ -1180,8 +1180,6 @@ class _WebEngineScripts(QObject):
         script.setRunsOnSubFrames(subframes)
         script.setName(f'_qute_{name}')
         self._widget.page().scripts().insert(script)
-        for script in self._web_scripts.values():
-            self._widget.page().scripts().insert(script)
 
     def _remove_js(self, name):
         """Remove an early QWebEngineScript."""
@@ -1191,6 +1189,17 @@ class _WebEngineScripts(QObject):
                 scripts.remove(script)
         else:  # Qt 5
             script = scripts.findScript(f'_qute_{name}')
+            if not script.isNull():
+                scripts.remove(script)
+
+    def _remove_scripts_by_name(self, name: str) -> None:
+        """Remove all scripts with the given name from the page collection."""
+        scripts = self._widget.page().scripts()
+        if machinery.IS_QT6:
+            for script in scripts.find(name):
+                scripts.remove(script)
+        else:  # Qt 5
+            script = scripts.findScript(name)
             if not script.isNull():
                 scripts.remove(script)
 
@@ -1360,14 +1369,13 @@ class _WebEngineScripts(QObject):
         script.setWorldId(_convert_usertype_world_id(world))
         script.setInjectionPoint(_convert_usertype_injection_point(injection_point))
         script.setRunsOnSubFrames(subframes)
+        self._remove_scripts_by_name(name)
         self._web_scripts[name] = script
         self._widget.page().scripts().insert(script)
 
     def remove_web_script(self, name: str) -> None:
         self._web_scripts.pop(name, None)
-        page = self._widget.page()
-        for s in self._web_scripts.values():
-            page.scripts().insert(s)
+        self._remove_scripts_by_name(name)
 
 
 class WebEngineTabPrivate(browsertab.AbstractTabPrivate):

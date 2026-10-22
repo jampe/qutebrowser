@@ -403,27 +403,28 @@ class BraveAdBlocker:
             cache_exists = self._cache_path.is_file()
         except OSError:
             logger.error("Failed to read adblock cache", exc_info=True)
-            return
+        else:
+            if cache_exists:
+                logger.debug("Loading cached adblock data: %s", self._cache_path)
+                try:
+                    with _map_exceptions():
+                        self._engine.deserialize_from_file(str(self._cache_path))
+                except DeserializationError:
+                    message.error(
+                        "Reading adblock filter data failed (corrupted data?). "
+                        "Please run :adblock-update."
+                    )
+                except OSError as e:
+                    message.error(f"Reading adblock filter data failed: {e}")
+            elif (
+                config.val.content.blocking.adblock.lists
+                and not self._has_basedir
+                and config.val.content.blocking.enabled
+                and self.enabled
+            ):
+                message.info("Run :adblock-update to get adblock lists.")
 
-        if cache_exists:
-            logger.debug("Loading cached adblock data: %s", self._cache_path)
-            try:
-                with _map_exceptions():
-                    self._engine.deserialize_from_file(str(self._cache_path))
-            except DeserializationError:
-                message.error(
-                    "Reading adblock filter data failed (corrupted data?). "
-                    "Please run :adblock-update."
-                )
-            except OSError as e:
-                message.error(f"Reading adblock filter data failed: {e}")
-        elif (
-            config.val.content.blocking.adblock.lists
-            and not self._has_basedir
-            and config.val.content.blocking.enabled
-            and self.enabled
-        ):
-            message.info("Run :adblock-update to get adblock lists.")
+        self.read_resources_cache()
 
     def read_resources_cache(self) -> None:
         """Add resources to the adblocking engine from the resources cache file."""
@@ -546,6 +547,13 @@ def add_cosmetic_filters(tab: apitypes.Tab, url: QUrl) -> None:
     if ad_blocker is None:
         return
 
+    last_navigation = tab.data.last_navigation
+    if last_navigation is not None and last_navigation.url != url:
+        # Subframe navigation: page-wide scripts are injected once for the
+        # main frame and run in subframes, so per-frame resources must not
+        # replace them mid-load.
+        return
+
     def _make_css(cosmetic_resources: adblock.UrlSpecificResources) -> str:
         return "\n".join(
             f"{sel} {{ display: none !important; }}"
@@ -652,8 +660,8 @@ def update_cosmetic_filters(tab: apitypes.Tab, ok: bool) -> None:
     )
     ad_blocker.surveyors[tab.tab_id] = state
 
-    # No web-script API here: remove_web_script() does not remove scripts from
-    # the page collection, and run_js_async targets the loaded document.
+    # Inject into the loaded document: the surveyor is installed once per
+    # document at load_finished, not as a page-load script.
     tab.run_js_async(
         resources.read_file("javascript/dom-surveyor.js"),
         world=usertypes.JsWorld.main,

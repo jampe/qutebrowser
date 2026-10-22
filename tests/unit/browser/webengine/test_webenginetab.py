@@ -14,6 +14,7 @@ QWebEngineScriptCollection = QtWebEngineCore.QWebEngineScriptCollection
 QWebEngineScript = QtWebEngineCore.QWebEngineScript
 
 from qutebrowser.browser import greasemonkey
+from qutebrowser.qt import machinery
 from qutebrowser.utils import javascript, usertypes
 webenginetab = pytest.importorskip(
     "qutebrowser.browser.webengine.webenginetab")
@@ -51,6 +52,30 @@ class TestWebengineScripts:
     @pytest.fixture
     def scripts_helper(self, webengine_tab):
         return ScriptsHelper(webengine_tab)
+
+    @pytest.mark.skipif(not machinery.IS_QT6,
+                        reason="scripts().find() is Qt 6 only")
+    def test_web_script_replace_and_remove(self, webengine_tab):
+        scripts = webengine_tab._scripts
+        page = webengine_tab._widget.page()
+
+        scripts.add_web_script(
+            'probe', 'window.__one = 1;', usertypes.JsWorld.main,
+            usertypes.InjectionPoint.creation, True)
+        scripts.add_web_script(
+            'probe', 'window.__two = 2;', usertypes.JsWorld.main,
+            usertypes.InjectionPoint.creation, True)
+
+        found = page.scripts().find('probe')
+        assert len(found) == 1
+        assert found[0].sourceCode() == 'window.__two = 2;'
+
+        scripts.add_web_script(
+            'other', 'window.__other = 1;', usertypes.JsWorld.main,
+            usertypes.InjectionPoint.creation, True)
+        scripts.remove_web_script('probe')
+        assert page.scripts().find('probe') == []
+        assert len(page.scripts().find('other')) == 1
 
     def test_greasemonkey_undefined_world(self, scripts_helper, caplog):
         """Make sure scripts with non-existent worlds are rejected."""
