@@ -957,7 +957,9 @@ def test_buggy_url_workaround_needed(
     assert not result.matched
 
 
-def test_corrupt_cache_handling(ad_blocker, message_mock, caplog):
+def test_corrupt_cache_handling(
+    ad_blocker, message_mock, caplog, ublock_resources_cache
+):
     ad_blocker._cache_path.write_text("blablub")
 
     with caplog.at_level(logging.ERROR):
@@ -1006,6 +1008,7 @@ def test_url_specific_cosmetic_filters(
 def _make_mock_tab(tab_id=0):
     tab = MagicMock()
     tab.tab_id = tab_id
+    tab.data.last_navigation = None
     return tab
 
 
@@ -1322,3 +1325,49 @@ def test_injected_script_has_dependencies(
     ]:
         assert marker in script
     assert 'setConstant("adblockTest", "42")' in script
+
+
+def test_read_cache_loads_scriptlet_resources(
+    config_stub, ad_blocker, ublock_filters, ublock_resources_cache, data_tmpdir
+):
+    """A fresh engine loads both filters and scriptlet resources from disk."""
+    config_stub.val.content.blocking.adblock.lists = [ublock_filters]
+    config_stub.val.content.blocking.enabled = True
+    config_stub.val.content.blocking.method = "both"
+    ad_blocker.adblock_update()  # writes adblock-cache.dat, loads resources
+
+    fresh = braveadblock.BraveAdBlocker(data_dir=pathlib.Path(str(data_tmpdir)))
+    fresh.read_cache()
+
+    resources = fresh.url_cosmetic_resources(YOUTUBE_URL)
+    assert resources is not None
+    assert resources.injected_script
+
+
+def test_add_cosmetic_filters_skips_subframes(surveyor):
+    url = QUrl("https://iframe.example/")
+    tab = _make_js_tab()
+    tab.data.last_navigation = SimpleNamespace(url=QUrl("https://example.com/"))
+
+    braveadblock.add_cosmetic_filters(tab, url)
+
+    surveyor.url_cosmetic_resources.assert_not_called()
+    tab.add_web_script.assert_not_called()
+    tab.add_dynamic_css.assert_not_called()
+
+
+def test_add_cosmetic_filters_main_frame(surveyor):
+    url = QUrl("https://example.com/")
+    tab = _make_js_tab()
+    tab.data.last_navigation = SimpleNamespace(url=url)
+    surveyor.url_cosmetic_resources.return_value = SimpleNamespace(
+        hide_selectors=[],
+        procedural_actions=set(),
+        exceptions=set(),
+        injected_script="",
+        generichide=False,
+    )
+
+    braveadblock.add_cosmetic_filters(tab, url)
+
+    surveyor.url_cosmetic_resources.assert_called_once_with(url)
