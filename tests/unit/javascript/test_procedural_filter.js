@@ -46,24 +46,54 @@ function action(selectors, actionObj) {
     return JSON.stringify(obj);
 }
 
-function run(actions, env) {
-    // env: { style, media, badXpath }
-    // Counters must be live (getters) — listeners fired after apply() (e.g.
-    // matches-media change) mutate them after this function has returned.
-    var counters = { hidden: 0, removed: 0 };
-    var node = {
-        textContent: 'some ad text',
-        parentElement: null,
-        localName: 'div',
+// Fake element node. `parentElement` defaults to a fake body so the
+// domWatcher's detached-node filter (parentElement === null) does not drop it.
+function makeNode(opts, counters) {
+    opts = opts || {};
+    return {
+        textContent: opts.textContent === undefined ? 'some ad text' : opts.textContent,
+        nodeType: 1,
+        parentElement: opts.parentElement === null
+            ? null : (opts.parentElement || { localName: 'body' }),
+        localName: opts.localName || 'div',
+        id: opts.id || '',
+        _classes: opts.classes || [],
         getAttributeNames: function() { return []; },
         getAttribute: function() { return null; },
         setAttribute: function() { counters.hidden++; },
-        removeAttribute: function() {},
+        removeAttribute: function() { counters.removeAttr++; },
         contains: function() { return false; },
         remove: function() { counters.removed++; },
         previousElementSibling: null,
         nextElementSibling: null,
     };
+}
+
+// Supports the selectors used by the engine tests: `tag`, `.class`,
+// `tag.class`, `#id`, `tag#id`.
+function matchesSelector(node, sel) {
+    var m = /^([a-z0-9]*)((?:[.#][\w-]+)*)$/i.exec(sel.trim());
+    if (m === null) { return false; }
+    if (m[1] !== '' && node.localName !== m[1].toLowerCase()) { return false; }
+    var re = /([.#])([\w-]+)/g;
+    var part;
+    while ((part = re.exec(m[2])) !== null) {
+        if (part[1] === '.' && node._classes.indexOf(part[2]) === -1) { return false; }
+        if (part[1] === '#' && node.id !== part[2]) { return false; }
+    }
+    return true;
+}
+
+function run(actions, env) {
+    // env: { style, media, badXpath, nodes }
+    // Counters must be live (getters) — listeners fired after apply() (e.g.
+    // matches-media change) mutate them after this function has returned.
+    var counters = { hidden: 0, removed: 0, removeAttr: 0, styles: 0 };
+    var state = { nodes: [] };
+    var specs = env.nodes || [{ localName: 'div', classes: ['ad'] }];
+    for (var si = 0; si < specs.length; si++) {
+        state.nodes.push(makeNode(specs[si], counters));
+    }
     var style = env.style || {};
     var media = env.media || {
         media: 'not all',
@@ -72,12 +102,18 @@ function run(actions, env) {
     };
     global.window = global;
     global.document = {
-        head: null,
-        body: null,
-        documentElement: null,
+        head: {
+            localName: 'head',
+            appendChild: function() { counters.styles++; }
+        },
+        body: { localName: 'body' },
+        documentElement: { localName: 'html', appendChild: function() {} },
         querySelectorAll: function(sel) {
-            if (sel === 'div' || sel === '.ad') { return [node]; }
-            return [];
+            var out = [];
+            for (var ni = 0; ni < state.nodes.length; ni++) {
+                if (matchesSelector(state.nodes[ni], sel)) { out.push(state.nodes[ni]); }
+            }
+            return out;
         },
         createElement: function() {
             return {
@@ -102,7 +138,20 @@ function run(actions, env) {
     };
     global.getComputedStyle = function() { return style; };
     global.matchMedia = function() { return media; };
-    global.MutationObserver = function() {};
+    // MutationObserver shim: remember the callback so fireMutation() can
+    // deliver a synthetic record batch. observe()/disconnect() are no-ops.
+    global.MutationObserver = function(callback) {
+        this._callback = callback;
+        global.__mutationObserverCallback = callback;
+    };
+    global.MutationObserver.prototype.observe = function() {};
+    global.MutationObserver.prototype.disconnect = function() {};
+    // Deterministic synchronous timers, so the SafeAnimationFrame deferral
+    // runs to completion inside fireMutation().
+    global.requestAnimationFrame = function(fn) { fn(); return 0; };
+    global.cancelAnimationFrame = function() {};
+    global.setTimeout = function(fn) { fn(); return 0; };
+    global.clearTimeout = function() {};
     global.XPathResult = { UNORDERED_NODE_SNAPSHOT_TYPE: 7 };
     global.self = global;
 
@@ -122,7 +171,29 @@ function run(actions, env) {
         hits: hits,
         get hidden() { return counters.hidden; },
         get removed() { return counters.removed; },
-        media: media
+        get removeAttr() { return counters.removeAttr; },
+        get styles() { return counters.styles; },
+        nodes: state.nodes,
+        media: media,
+        // Register a new fake element (returned; also appended to the
+        // document registry so querySelectorAll sees it).
+        addNode: function(opts) {
+            var n = makeNode(opts, counters);
+            state.nodes.push(n);
+            return n;
+        },
+        // Deliver a synthetic MutationObserver batch. The synchronous timer
+        // stubs make the engine's SafeAnimationFrame deferral run immediately.
+        fireMutation: function(addedNodes, removedNodes) {
+            global.__mutationObserverCallback([{
+                addedNodes: addedNodes || [],
+                removedNodes: removedNodes || []
+            }]);
+        },
+        // Re-enter the public API without reloading the engine (persistence).
+        applyMore: function(moreActions) {
+            return window._qutebrowser.proceduralFilterer.apply(moreActions);
+        }
     };
 }
 
@@ -181,6 +252,51 @@ r6.media.matches = true;
 r6.media.listener();
 check(r6.hidden > 0,
     'matches-media re-applies after media change (commit wiring)');
+
+// --- Step 3: domWatcher live re-application --------------------------------
+
+var t1 = run([action([cssSelector('div.late')])], { nodes: [] });
+check(t1.hits === 0 && t1.hidden === 0,
+    'domWatcher: no match before late insertion');
+var t1node = t1.addNode({ localName: 'div', classes: ['late'] });
+t1.fireMutation([t1node]);
+check(t1.hidden >= 1,
+    'domWatcher: late-inserted node hidden without a new apply()');
+
+var t2 = run([action([cssSelector('script')])], { nodes: [] });
+var t2node = t2.addNode({ localName: 'script' });
+t2.fireMutation([t2node]);
+check(t2.hidden === 0,
+    'domWatcher: script insertions are ignored (ignoreTags)');
+
+var t3 = run([action([cssSelector('div')])],
+    { nodes: [{ localName: 'div' }] });
+check(t3.hits === 1 && t3.hidden > 0,
+    'domWatcher: initial hide before removal');
+var t3node = t3.nodes[0];
+t3.nodes.length = 0;
+t3.fireMutation([], [t3node]);
+check(t3.removeAttr >= 1,
+    'domWatcher: removal re-runs commitNow and un-hides stale nodes');
+
+var t4 = run([action([cssSelector('div')])],
+    { nodes: [{ localName: 'div' }] });
+check(t4.hits === 1,
+    'persistent filterer: first apply reports one hit');
+t4.addNode({ localName: 'div', classes: ['extra'] });
+var t4hits = t4.applyMore([action([cssSelector('div.extra')])]);
+check(t4hits === 2,
+    'persistent filterer: second apply reuses the same filterer (2 hits)');
+var t4hidden = t4.hidden;
+var t4again = t4.applyMore([action([cssSelector('div.extra')])]);
+check(t4again === 2 && t4.hidden === t4hidden,
+    'persistent filterer: duplicate actions deduped by raw selector');
+
+var t5 = run([action([cssSelector('head')])], { nodes: [] });
+var t5node = t5.addNode({ localName: 'head' });
+t5.fireMutation([t5node]);
+check(t5.hidden === 0,
+    'domWatcher: head insertions are ignored (ignoreTags)');
 
 // --- module load safety -----------------------------------------------------
 
