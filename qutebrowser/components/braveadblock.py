@@ -440,7 +440,7 @@ class BraveAdBlocker:
             try:
                 resources = deserialize_resources_from_file(self._resources_cache_path)
                 batch = [
-                    (r.name, r.content_type, r.content, r.aliases)
+                    (r.name, r.content_type, r.content, r.aliases, r.dependencies)
                     for r in resources
                 ]
                 self._engine.add_resources(batch)
