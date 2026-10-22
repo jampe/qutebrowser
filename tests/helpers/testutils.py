@@ -290,6 +290,17 @@ def ublock_scriptlet_resource(name):
     return gzip.open(path)
 
 
+def ublock_scriptlet_module(filename):
+    """Get a gzipped uBlock scriptlets submodule.
+
+    The fixtures are stored flat by basename; ``filename`` may contain a
+    relative directory (e.g. ``../arglist-parser.js``).
+    """
+    name = os.path.basename(filename)
+    path = os.path.join(abs_datapath(), "ublock", "scriptlet-modules", f"{name}.gz")
+    return gzip.open(path)
+
+
 def ublock_resources_cache():
     path = os.path.join(abs_datapath(), "ublock", "adblock-resources-cache.dat.gz")
     return gzip.open(path)

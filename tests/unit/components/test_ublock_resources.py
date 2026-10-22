@@ -83,7 +83,6 @@ SCRIPTLET_RESOURCES = [
     ("run-at.fn", [], "javascript"),
     ("run-at-html-element.fn", [], "javascript"),
     ("proxy-apply.fn", [], "javascript"),
-    ("proxy-apply-config.js", [], "javascript"),
     ("validate-constant.fn", [], "javascript"),
     ("set-constant.fn", [], "javascript"),
     ("set-constant.js", ["set.js"], "javascript"),
@@ -119,7 +118,6 @@ SCRIPTLET_RESOURCES = [
     ("edit-outbound-object.fn", [], "javascript"),
     ("edit-outbound-object.js", [], "javascript"),
     ("trusted-edit-outbound-object.js", [], "javascript"),
-    ("json-edit.fn", [], "javascript"),
     ("json-edit.js", [], "javascript"),
     ("trusted-json-edit.js", [], "javascript"),
     ("edit-inbound-object.fn", [], "javascript"),
@@ -219,6 +217,26 @@ SCRIPTLET_RESOURCES = [
     ("trusted-prevent-dom-bypass.js", [], "javascript"),
     ("trusted-override-element-method.js", [], "javascript"),
 ]
+
+
+@pytest.fixture
+def scriptlet_modules(monkeypatch):
+    """Serve scriptlets.js submodule imports from local fixtures.
+
+    ublock_resources fetches imported submodules from uBlock master at parse
+    time; tests must not depend on the network or on a moving upstream. The
+    fixtures (and scriptlets.js) were generated from uBlock dev commit
+    a36d1912e (2026-07-13).
+    """
+
+    def fetch(filename):
+        try:
+            with testutils.ublock_scriptlet_module(filename) as f:
+                return f.read().decode("utf-8")
+        except FileNotFoundError:
+            pytest.fail(f"Unexpected scriptlet submodule requested: {filename}")
+
+    monkeypatch.setattr(ublock_resources, "_fetch_submodule_text", fetch)
 
 
 def path_to_url(path):
@@ -423,6 +441,7 @@ def test_parse_resource(
 def test_parse_scriptlets(
     scriptlets_js,
     scriptlet_resources,
+    scriptlet_modules,
 ):
     ublock_resources._SCRIPTLETS_URL = scriptlets_js.url
     resources = []
@@ -468,6 +487,7 @@ def test_resources_update(
     scriptlets_js,
     redirect_resources,
     local_resources,
+    scriptlet_modules,
 ):
     config_stub.val.content.blocking.enabled = True
     config_stub.val.content.blocking.method = "both"
