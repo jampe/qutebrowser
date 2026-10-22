@@ -149,9 +149,11 @@ Feature: Various utility commands.
     @qtwebkit_skip
     Scenario: Third-party iframes in qutebrowser stylesheet script
         When I load a third-party iframe
-        # rerun set_css in stylesheet.js
+        # rerun set_css via the per-frame Qt API
         And I set content.user_stylesheets to []
-        Then the javascript message "Failed to style frame:* Blocked a frame with origin * from accessing *" should be logged
+        # QWebEngineFrame.runJavaScript reaches cross-origin frames, so the
+        # old window.frames SecurityError must not happen anymore.
+        Then the javascript message "Failed to style frame:*" should not be logged
 
     # :debug-webaction
 

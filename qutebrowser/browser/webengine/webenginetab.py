@@ -11,7 +11,8 @@ import dataclasses
 import re
 import html as html_utils
 from collections import OrderedDict
-from typing import cast, TypeAlias
+from collections.abc import Iterator
+from typing import Any, cast, TypeAlias
 
 from qutebrowser.qt.core import (pyqtSignal, pyqtSlot, Qt, QPoint, QPointF, QUrl,
                           QObject, QByteArray, QTimer)
@@ -58,6 +59,47 @@ def _convert_usertype_injection_point(injection_point: usertypes.InjectionPoint)
         usertypes.InjectionPoint.creation: QWebEngineScript.InjectionPoint.DocumentCreation,
     }
     return mapping[injection_point]
+
+
+def _iter_frames(frame: Any) -> Iterator[Any]:
+    """Yield a QWebEngineFrame and all its descendants."""
+    yield frame
+    for child in frame.children():
+        yield from _iter_frames(child)
+
+
+def _apply_stylesheet_to_frames(page: Any, css: str) -> bool:
+    """Apply the stylesheet to every frame via Qt's frame API.
+
+    window.frames cannot reach cross-origin frames (SecurityError), and such
+    frames can also miss the DocumentCreation stylesheet script, so the module
+    is installed on demand before set_css() runs. Returns False when the Qt
+    version has no QWebEngineFrame API (Qt < 6.8), so the caller can fall back
+    to the top frame.
+    """
+    main_frame = getattr(page, 'mainFrame', None)
+    if main_frame is None:
+        return False
+
+    module_js = javascript.wrap_global(
+        'stylesheet', resources.read_file('javascript/stylesheet.js'))
+    set_css = javascript.assemble('stylesheet', 'set_css', css, False, False)
+    code = (
+        '(function() {\n'
+        'if (!window._qutebrowser || !window._qutebrowser.stylesheet) {\n'
+        + module_js + '\n'
+        '}\n'
+        'if (window._qutebrowser && window._qutebrowser.stylesheet) {\n'
+        + set_css + '\n'
+        '}\n'
+        '})();'
+    )
+    world_id = int(QWebEngineScript.ScriptWorldId.ApplicationWorld)
+    for frame in _iter_frames(main_frame()):
+        if not frame.isValid():
+            continue
+        frame.runJavaScript(code, world_id)
+    return True
 
 
 class WebEngineAction(browsertab.AbstractAction):
@@ -1092,12 +1134,15 @@ class _WebEngineScripts(QObject):
         # (e.g. after load_finished). While a load is in progress the
         # re-injected script covers the new document, and running set_css()
         # before module init would only produce a TypeError.
-        code = javascript.assemble('stylesheet', 'set_css', css)
-        self._tab.run_js_async(
-            'if (window._qutebrowser && window._qutebrowser.stylesheet) {\n'
-            + code
-            + '\n}'
-        )
+        if not _apply_stylesheet_to_frames(self._widget.page(), css):
+            # Qt < 6.8: no QWebEngineFrame, stylesheet.js forwards to
+            # same-origin child frames itself.
+            code = javascript.assemble('stylesheet', 'set_css', css)
+            self._tab.run_js_async(
+                'if (window._qutebrowser && window._qutebrowser.stylesheet) {\n'
+                + code
+                + '\n}'
+            )
 
     def _stylesheet_css(self, searching: bool = False) -> str:
         """Return the full stylesheet css (dynamic css, then user stylesheet)."""
