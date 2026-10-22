@@ -147,6 +147,7 @@ Feature: Various utility commands.
         Then the javascript message "Refused to apply inline style because it violates the following Content Security Policy directive: *" should be logged
 
     @qtwebkit_skip
+    @qt>=6.8
     Scenario: Third-party iframes in qutebrowser stylesheet script
         When I load a third-party iframe
         # rerun set_css via the per-frame Qt API
