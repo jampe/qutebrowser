@@ -1976,6 +1976,13 @@ Default:
 
 - +pass:[https://easylist.to/easylist/easylist.txt]+
 - +pass:[https://easylist.to/easylist/easyprivacy.txt]+
+- +pass:[https://ublockorigin.github.io/uAssetsCDN/filters/filters.min.txt]+
+- +pass:[https://ublockorigin.github.io/uAssetsCDN/filters/badware.min.txt]+
+- +pass:[https://ublockorigin.github.io/uAssetsCDN/filters/privacy.min.txt]+
+- +pass:[https://ublockorigin.github.io/uAssetsCDN/filters/unbreak.min.txt]+
+- +pass:[https://ublockorigin.github.io/uAssetsCDN/filters/quick-fixes.min.txt]+
+- +pass:[https://curbengh.github.io/malware-filter/urlhaus-filter-ag-online.txt]+
+- +pass:[https://pgl.yoyo.org/adservers/serverlist.php?hostformat=adblockplus&showintro=0&mimetype=plaintext]+
 
 [[content.blocking.enabled]]
 === content.blocking.enabled
