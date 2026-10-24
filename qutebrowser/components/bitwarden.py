@@ -115,11 +115,18 @@ class FakeVault:
         self._unlocked = False
 
 
+def _is_session_error(error: str) -> bool:
+    lowered = error.lower()
+    return any(token in lowered for token in (
+        'invalid session', 'session key', 'vault is locked', 'not logged in'))
+
+
 class BwCliVault:
 
     def __init__(self) -> None:
         self._bw = shutil.which('bw')
-        self._session: str | None = None
+        self._session = os.environ.get('BW_SESSION') or None
+        self._session_from_env = self._session is not None
 
     @property
     def unlocked(self) -> bool:
@@ -133,6 +140,9 @@ class BwCliVault:
             text=True, capture_output=True, check=False)
         if process.returncode:
             error = process.stderr.strip() or process.stdout.strip()
+            if self._session is not None and _is_session_error(error):
+                self._session = None
+                self._session_from_env = False
             raise VaultError(error or "Bitwarden CLI failed")
         return process.stdout
 
@@ -148,6 +158,7 @@ class BwCliVault:
         if process.returncode:
             raise VaultError(process.stderr.strip() or "Unlock failed")
         self._session = process.stdout.strip()
+        self._session_from_env = False
         return bool(self._session)
 
     def _session_args(self) -> list[str]:
@@ -178,6 +189,7 @@ class BwCliVault:
 
     def lock(self) -> None:
         self._session = None
+        self._session_from_env = False
         if self._bw is not None:
             try:
                 self._run('lock')
@@ -498,7 +510,8 @@ class BitwardenComponent:
 
     def _lookup(self, url: str,
                 callback: Callable[[list[VaultItem] | None, str | None],
-                                   None]) -> None:
+                                   None], *,
+                allow_retry: bool = True) -> None:
         parsed = urlparse(url)
         host = parsed.hostname or parsed.path
         if not host:
@@ -507,22 +520,29 @@ class BitwardenComponent:
         log.extensions.debug("Bitwarden lookup host=%s", host)
         self._ensure_unlocked(
             lambda unlocked, error: self._lookup_unlocked(
-                host, callback, unlocked, error))
+                host, callback, unlocked, error, allow_retry=allow_retry))
 
     def _lookup_unlocked(
             self, host: str,
             callback: Callable[[list[VaultItem] | None, str | None], None],
-            unlocked: bool, error: str | None) -> None:
+            unlocked: bool, error: str | None, *,
+            allow_retry: bool) -> None:
         if not unlocked:
             callback(None, error)
             return
-        self._run(
-            lambda: self._vault.list_items(host),
-            lambda items, error: (
+
+        def on_items(items: list[VaultItem] | None,
+                     error: str | None) -> None:
+            if error:
                 log.extensions.debug(
                     "Bitwarden lookup result count=%d error=%s",
-                    len(items or []), error),
-                callback(items, error))[1])
+                    len(items or []), error)
+            if error and allow_retry and _is_session_error(error):
+                self._lookup(host, callback, allow_retry=False)
+                return
+            callback(items, error)
+
+        self._run(lambda: self._vault.list_items(host), on_items)
 
     def _run(self, func: Callable[[], Any],
              callback: Callable[[Any, str | None], None]) -> None:

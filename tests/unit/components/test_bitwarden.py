@@ -167,6 +167,32 @@ def test_auto_fill_toggle(component, tab, frame):
     assert component.toggle_autofill() is True
 
 
+def test_bw_session_from_env(monkeypatch):
+    monkeypatch.setenv('BW_SESSION', 'session-value')
+    vault = bitwarden.BwCliVault()
+    assert vault.unlocked
+    assert vault._session == 'session-value'  # noqa: SLF001
+    assert vault._session_from_env  # noqa: SLF001
+
+
+def test_bw_invalid_session_clears(monkeypatch):
+    monkeypatch.setenv('BW_SESSION', 'stale')
+
+    class Result:
+        returncode = 1
+        stdout = ''
+        stderr = 'Invalid session.'
+
+    vault = bitwarden.BwCliVault()
+    vault._bw = '/bin/true'  # noqa: SLF001
+    monkeypatch.setattr(bitwarden.subprocess, 'run',
+                        lambda *args, **kwargs: Result())
+    with pytest.raises(bitwarden.VaultError, match='Invalid session'):
+        vault.list_items('example.com')
+    assert not vault.unlocked
+    assert vault._session is None  # noqa: SLF001
+
+
 def test_fake_vault_matches_subdomains():
     vault = bitwarden.FakeVault(ITEMS)
     assert [item.id for item in vault.list_items(
