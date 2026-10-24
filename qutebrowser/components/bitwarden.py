@@ -16,6 +16,7 @@ import os
 import shutil
 import subprocess
 import threading
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 from urllib.parse import urlparse
@@ -248,6 +249,9 @@ class BitwardenComponent:
         self._runner = _AsyncRunner()
         self._autofill_on_load = autofill_on_load
         self._last_status = ""
+        self._unlock_prompt_active = False
+        self._unlock_callbacks: list[Callable[[bool, str | None], None]] = []
+        self._unlock_suppressed_until = 0.0
 
     @staticmethod
     def _make_vault() -> Any:
@@ -469,25 +473,61 @@ class BitwardenComponent:
         if getattr(self._vault, 'unlocked', False):
             callback(True, None)
             return
+        if self._unlock_prompt_active:
+            self._unlock_callbacks.append(callback)
+            return
+        if time.monotonic() < self._unlock_suppressed_until:
+            callback(False, "Unlock cancelled")
+            return
 
-        def on_password(password: Any) -> None:
-            if not password:
-                callback(False, "Unlock cancelled")
-                return
-            self._run(
-                lambda: self._vault.unlock(str(password)),
-                lambda _result, error: callback(error is None, error))
-
-        self._ask_master_password(on_password)
+        self._unlock_prompt_active = True
+        self._unlock_callbacks = [callback]
+        self._ask_master_password(self._on_unlock_password,
+                                  cancelled=self._on_unlock_cancelled)
 
     def _ask_master_password(
-            self, callback: Callable[[str | None], None]) -> None:
+            self, callback: Callable[[str | None], None], *,
+            cancelled: Callable[[], None] | None = None) -> None:
         """Ask for the master password only; the CLI session is already logged in."""
         qmessage.ask_async(
             "Bitwarden Master Password",
             usertypes.PromptMode.password,
             callback,
+            cancelled=cancelled,
         )
+
+    def _on_unlock_password(self, password: Any) -> None:
+        if not self._unlock_prompt_active:
+            return
+        self._unlock_prompt_active = False
+        if not password:
+            self._finish_unlock(False, "Unlock cancelled", suppress=60)
+            return
+        self._run(
+            lambda: self._vault.unlock(str(password)),
+            lambda _result, error: self._finish_unlock(
+                error is None, error, suppress=5 if error else 0))
+
+    def _on_unlock_cancelled(self) -> None:
+        if not self._unlock_prompt_active:
+            return
+        self._unlock_prompt_active = False
+        self._finish_unlock(False, "Unlock cancelled", suppress=60)
+
+    def _finish_unlock(self, ok: bool, error: str | None, *,
+                       suppress: int = 0) -> None:
+        if suppress:
+            self._unlock_suppressed_until = time.monotonic() + suppress
+        callbacks = self._unlock_callbacks
+        self._unlock_callbacks = []
+        for callback in callbacks:
+            callback(ok, error)
+
+    def unlock_now(
+            self, callback: Callable[[bool, str | None], None]) -> None:
+        """Prompt explicitly, even after a recent cancellation."""
+        self._unlock_suppressed_until = 0.0
+        self._ensure_unlocked(callback)
 
     def _lookup(self, url: str,
                 callback: Callable[[list[VaultItem] | None, str | None],
@@ -581,6 +621,22 @@ def bitwarden_lock() -> None:
         return
     component.vault.lock()
     message.info("Bitwarden locked")
+
+
+@cmdutils.register()
+def bitwarden_unlock() -> None:
+    """Prompt to unlock the Bitwarden vault now."""
+    component = _current()
+    if component is None:
+        return
+
+    def done(ok: bool, error: str | None) -> None:
+        if ok:
+            message.info("Bitwarden unlocked")
+        else:
+            message.error("Bitwarden unlock failed: {}".format(error))
+
+    component.unlock_now(done)
 
 
 @cmdutils.register()

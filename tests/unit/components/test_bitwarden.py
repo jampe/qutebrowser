@@ -208,7 +208,7 @@ def test_status(component):
 
 def test_unlock_uses_password_only(component):
     component.vault.lock()
-    component._ask_master_password = lambda callback: callback('master')
+    component._ask_master_password = lambda callback, **kwargs: callback('master')
     results = []
     component._ensure_unlocked(lambda ok, error: results.append((ok, error)))
     assert results == [(True, None)]
@@ -228,9 +228,49 @@ def test_master_password_uses_builtin_prompt(component, monkeypatch):
     assert results == ['master']
 
 
+def test_unlock_cancel_suppresses_retry(component):
+    component.vault.lock()
+    prompts = []
+
+    def ask(callback, **kwargs):
+        prompts.append((callback, kwargs))
+
+    component._ask_master_password = ask  # type: ignore[method-assign]
+    results = []
+    component._ensure_unlocked(lambda ok, error: results.append((ok, error)))
+    assert len(prompts) == 1
+
+    prompts[0][1]['cancelled']()
+    assert results == [(False, 'Unlock cancelled')]
+
+    # Automatic lookups must not reopen the prompt immediately.
+    component._ensure_unlocked(lambda ok, error: results.append((ok, error)))
+    assert len(prompts) == 1
+    assert results[-1] == (False, 'Unlock cancelled')
+
+    # An explicit unlock command may prompt again.
+    component._ask_master_password = (
+        lambda callback, **kwargs: callback('master'))  # type: ignore[method-assign]
+    component.unlock_now(lambda ok, error: results.append((ok, error)))
+    assert results[-1] == (True, None)
+
+
+def test_unlock_prompt_is_deduplicated(component):
+    component.vault.lock()
+    prompts = []
+    component._ask_master_password = (
+        lambda callback, **kwargs: prompts.append(callback))  # type: ignore[method-assign]
+    results = []
+    component._ensure_unlocked(lambda ok, error: results.append(('a', ok)))
+    component._ensure_unlocked(lambda ok, error: results.append(('b', ok)))
+    assert len(prompts) == 1
+    prompts[0]('master')
+    assert results == [('a', True), ('b', True)]
+
+
 def test_master_password_empty_cancels(component):
     component.vault.lock()
-    component._ask_master_password = lambda callback: callback(None)
+    component._ask_master_password = lambda callback, **kwargs: callback(None)
     results = []
     component._ensure_unlocked(lambda ok, error: results.append((ok, error)))
     assert results == [(False, 'Unlock cancelled')]
