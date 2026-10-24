@@ -21,6 +21,7 @@ from qutebrowser.qt.printsupport import QPrintDialog, QPrinter
 from qutebrowser.qt.network import QNetworkAccessManager
 
 if TYPE_CHECKING:
+    from qutebrowser.api import apitypes
     from qutebrowser.qt.webkit import QWebHistory, QWebHistoryItem
     from qutebrowser.qt.webkitwidgets import QWebPage
     from qutebrowser.qt.webenginecore import (
@@ -1319,6 +1320,18 @@ class AbstractTab(QWidget):
 
     def frames(self) -> list[Any]:
         """Get backend handles for the frames of the current document."""
+        raise NotImplementedError
+
+    messaging_supported = False
+    site_isolation = False
+    can_fill_cross_site = False
+
+    def send_message(
+            self,
+            payload: dict[str, Any], *,
+            frame: Any | None = None,
+    ) -> None:
+        """Send a JSON payload to one frame of this tab."""
         raise NotImplementedError
 
     def add_dynamic_css(self, name: str, css: str) -> None:

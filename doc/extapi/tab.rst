@@ -1,6 +1,18 @@
 Tab API
 =======
 
+Extension-facing tab API
+------------------------
+
+.. autoclass:: qutebrowser.api.apitypes.ExtensionTab
+   :members:
+
+.. autoclass:: qutebrowser.api.apitypes.Frame
+   :members:
+
+Core tab API
+------------
+
 .. autoclass:: qutebrowser.browser.browsertab.AbstractTab()
    :members:
 

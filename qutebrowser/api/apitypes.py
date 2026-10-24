@@ -25,7 +25,7 @@ from qutebrowser.browser.webelem import (  # noqa: F401
     AbstractWebElement as WebElement,
 )
 from qutebrowser.utils import usertypes
-from qutebrowser.utils.usertypes import ClickTarget, JsWorld  # noqa: F401
+from qutebrowser.utils.usertypes import ClickTarget, JsWorld, InjectionPoint  # noqa: F401
 from qutebrowser.extensions.loader import InitContext  # noqa: F401
 
 
@@ -87,6 +87,27 @@ def _url_origin(url: QUrl) -> str | None:
     return f'{scheme}://{host}'
 
 
+def _is_same_site(first: QUrl, second: QUrl) -> bool:
+    """Approximate same-site check for secret delivery.
+
+    Without a PSL dependency this is deliberately conservative: exact host or
+    a parent/child host relationship on the same scheme.
+    """
+    first_origin = _url_origin(first)
+    second_origin = _url_origin(second)
+    if first_origin is None or second_origin is None:
+        return False
+    if first.scheme() != second.scheme():
+        return False
+    first_host = first.host()
+    second_host = second.host()
+    return (
+        first_host == second_host
+        or first_host.endswith('.' + second_host)
+        or second_host.endswith('.' + first_host)
+    )
+
+
 class ExtensionTab:
 
     """Narrow tab API exposed to components/extensions.
@@ -125,6 +146,18 @@ class ExtensionTab:
         """The URL of the last main-frame navigation, if any."""
         navigation = self._tab().data.last_navigation
         return None if navigation is None else QUrl(navigation.url)
+
+    @property
+    def messaging_supported(self) -> bool:
+        return bool(self._tab().messaging_supported)
+
+    @property
+    def site_isolation(self) -> bool:
+        return bool(self._tab().site_isolation)
+
+    @property
+    def can_fill_cross_site(self) -> bool:
+        return bool(self._tab().can_fill_cross_site)
 
     def url(self) -> QUrl:
         return self._tab().url()
@@ -182,3 +215,33 @@ class ExtensionTab:
             raw_frame = frame._backend_frame
         self._tab().run_js_async(
             code, callback, world=world, frame=raw_frame, name=name)
+
+    def send_message(
+            self,
+            payload: dict[str, Any], *,
+            frame: Frame | None = None,
+    ) -> None:
+        """Send a JSON payload to one frame, guarded by its document token.
+
+        ``frame=None`` targets the main frame. Cross-site frames are refused
+        in v1; only the main frame and same-site subframes are allowed.
+        """
+        if not self.messaging_supported:
+            raise UnsupportedOperationError(
+                "Extension messaging is not available")
+
+        raw_frame = None
+        if frame is not None:
+            if frame.tab is not self:
+                raise WebTabError("Frame belongs to a different tab")
+            if not frame.is_valid:
+                raise WebTabError("Frame is no longer valid")
+            if _url_origin(frame.url) is None:
+                raise WebTabError("Refusing to fill an opaque-origin frame")
+            if (not frame.is_main
+                    and not _is_same_site(self.url(), frame.url)):
+                raise WebTabError(
+                    "Refusing to send secrets to a cross-site frame")
+            raw_frame = frame._backend_frame
+
+        self._tab().send_message(payload, frame=raw_frame)

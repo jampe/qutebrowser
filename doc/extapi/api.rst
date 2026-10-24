@@ -33,6 +33,13 @@ hook module
 .. automodule:: qutebrowser.api.hook
    :members:
 
+messaging module
+----------------
+
+.. automodule:: qutebrowser.api.messaging
+   :members:
+   :imported-members:
+
 interceptor module
 ------------------
 

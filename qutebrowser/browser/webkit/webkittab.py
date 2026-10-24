@@ -921,6 +921,10 @@ class WebKitTab(browsertab.AbstractTab):
     def frames(self):
         return []
 
+    def send_message(self, payload, *, frame=None):
+        raise browsertab.UnsupportedOperationError(
+            "Extension messaging is not supported on QtWebKit")
+
     def add_dynamic_css(self, name: str, css: str) -> None:
         """Does nothing on QtWebKit."""
 

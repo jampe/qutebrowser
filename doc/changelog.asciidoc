@@ -19,6 +19,13 @@ breaking changes (such as renamed commands) can happen in minor releases.
 v3.8.0 (unreleased)
 -------------------
 
+Added
+~~~~~
+
+- New component API for page integration: a narrow `ExtensionTab` adapter,
+  per-frame `Frame` handles, and an ApplicationWorld messaging channel
+  (`qutebrowser.api.messaging`) for isolated content scripts.
+
 Removed
 ~~~~~~~
 

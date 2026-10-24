@@ -12,7 +12,7 @@ import re
 import html as html_utils
 from collections import OrderedDict
 from collections.abc import Iterator
-from typing import cast, TypeAlias
+from typing import Any, cast, TypeAlias
 
 from qutebrowser.qt.core import (pyqtSignal, pyqtSlot, Qt, QPoint, QPointF, QUrl,
                           QObject, QByteArray, QTimer)
@@ -31,23 +31,35 @@ from qutebrowser.qt import sip, machinery
 from qutebrowser.misc import objects, miscwidgets
 
 
+def _script_world(name: str) -> int:
+    """Get a QWebEngineScript world id on Qt 5 or Qt 6."""
+    if machinery.IS_QT6:
+        return int(getattr(QWebEngineScript.ScriptWorldId, name))
+    return int(getattr(QWebEngineScript, name))
+
+
+_MAIN_WORLD = _script_world('MainWorld')
+_APPLICATION_WORLD = _script_world('ApplicationWorld')
+_USER_WORLD = _script_world('UserWorld')
+
+
 # Mapping worlds from usertypes.JsWorld to QWebEngineScript world IDs.
 _JS_WORLD_MAP = {
-    usertypes.JsWorld.main: QWebEngineScript.ScriptWorldId.MainWorld,
-    usertypes.JsWorld.application: QWebEngineScript.ScriptWorldId.ApplicationWorld,
-    usertypes.JsWorld.user: QWebEngineScript.ScriptWorldId.UserWorld,
-    usertypes.JsWorld.jseval: QWebEngineScript.ScriptWorldId.UserWorld + 1,
+    usertypes.JsWorld.main: _MAIN_WORLD,
+    usertypes.JsWorld.application: _APPLICATION_WORLD,
+    usertypes.JsWorld.user: _USER_WORLD,
+    usertypes.JsWorld.jseval: _USER_WORLD + 1,
 }
 
 
 def _convert_usertype_world_id(world: usertypes.JsWorld) -> int:
     """Convert a JsWorld enum to a Qt JavaScript world ID."""
     if world == usertypes.JsWorld.application:
-        return QWebEngineScript.ScriptWorldId.ApplicationWorld
+        return _APPLICATION_WORLD
     if world == usertypes.JsWorld.user:
-        return QWebEngineScript.ScriptWorldId.UserWorld
+        return _USER_WORLD
     if world == usertypes.JsWorld.main:
-        return QWebEngineScript.ScriptWorldId.MainWorld
+        return _MAIN_WORLD
     raise ValueError(f"Invalid JsWorld: {world!r}")
 
 
@@ -1051,7 +1063,7 @@ class _Quirk:
     filename: str
     injection_point: QWebEngineScript.InjectionPoint = (
         QWebEngineScript.InjectionPoint.DocumentCreation)
-    world: QWebEngineScript.ScriptWorldId = QWebEngineScript.ScriptWorldId.MainWorld
+    world: int = _MAIN_WORLD
     predicate: bool = True
     name: str | None = None
 
@@ -1097,7 +1109,7 @@ class _WebEngineScripts(QObject):
         self._tab.run_js_async(code)
 
     def _inject_js(self, name, js_code, *,
-                   world=QWebEngineScript.ScriptWorldId.ApplicationWorld,
+                   world=_APPLICATION_WORLD,
                    injection_point=QWebEngineScript.InjectionPoint.DocumentCreation,
                    subframes=False):
         """Inject the given script to run early on a page load."""
@@ -1241,7 +1253,7 @@ class _WebEngineScripts(QObject):
             _Quirk(
                 'whatsapp_web',
                 injection_point=QWebEngineScript.InjectionPoint.DocumentReady,
-                world=QWebEngineScript.ScriptWorldId.ApplicationWorld,
+                world=_APPLICATION_WORLD,
             ),
             _Quirk('discord'),
             _Quirk(
@@ -1334,6 +1346,8 @@ class WebEngineTabPrivate(browsertab.AbstractTabPrivate):
         return self._widget.render_widget()
 
     def shutdown(self):
+        from qutebrowser.extensions import messaging  # noqa: PLC0415
+        messaging.detach(self._tab)
         self._tab.shutting_down.emit()
         self._tab.action.exit_fullscreen()
         self._widget.shutdown()
@@ -1390,6 +1404,16 @@ class WebEngineTab(browsertab.AbstractTab):
         self._child_event_filter = None
         self._saved_zoom = None
         self._scripts.init()
+        from qutebrowser.extensions import messaging  # noqa: PLC0415
+        try:
+            messaging.attach(self)
+        except Exception:  # noqa: BLE001
+            try:
+                messaging.detach(self)
+            except Exception:  # noqa: BLE001
+                pass
+            log.extensions.exception(
+                "Failed to attach extension messaging; disabling")
         # WORKAROUND for https://bugreports.qt.io/browse/QTBUG-65223
         self._needs_qtbug65223_workaround = (
             version.qtwebengine_versions().webengine < utils.VersionNumber(5, 15, 5))
@@ -1458,8 +1482,8 @@ class WebEngineTab(browsertab.AbstractTab):
             log.webview.debug(f"Running JS ({name}), {len(code)} bytes")
 
         if world is None:
-            app_world = QWebEngineScript.ScriptWorldId.ApplicationWorld
-            world_id: QWebEngineScript.ScriptWorldId | int = app_world
+            app_world = _APPLICATION_WORLD
+            world_id: int = app_world
         elif isinstance(world, int):
             world_id = world
             if not 0 <= world_id <= qtutils.MAX_WORLD_ID:
@@ -1496,6 +1520,17 @@ class WebEngineTab(browsertab.AbstractTab):
         if main_frame is None:
             return []
         return list(_iter_frames(main_frame()))
+
+    @property
+    def messaging_supported(self) -> bool:
+        return bool(getattr(self, '_messaging_supported', False))
+
+    def send_message(self, payload, *, frame=None):
+        bridge = getattr(self, '_messaging_bridge', None)
+        if bridge is None or not bridge.enabled:
+            raise browsertab.UnsupportedOperationError(
+                "Extension messaging is not available")
+        bridge.post(payload, frame)
 
     def add_dynamic_css(self, name: str, css: str) -> None:
         self._scripts.add_dynamic_css(name, css)
