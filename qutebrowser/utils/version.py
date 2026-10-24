@@ -393,7 +393,7 @@ def _create_module_info() -> dict[str, ModuleInfo]:
         ('jinja2', []),
         ('pygments', ['__version__']),
         ('yaml', ['__version__']),
-        ('adblock', ['__version__'], "0.3.2"),
+        ('adblock', ['__version__'], "0.7.0"),
         ('objc', ['__version__']),
     ]
 

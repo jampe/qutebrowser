@@ -147,11 +147,14 @@ Feature: Various utility commands.
         Then the javascript message "Refused to apply inline style because it violates the following Content Security Policy directive: *" should be logged
 
     @qtwebkit_skip
+    @qt>=6.8
     Scenario: Third-party iframes in qutebrowser stylesheet script
         When I load a third-party iframe
-        # rerun set_css in stylesheet.js
+        # rerun set_css via the per-frame Qt API
         And I set content.user_stylesheets to []
-        Then the javascript message "Failed to style frame:* Blocked a frame with origin * from accessing *" should be logged
+        # QWebEngineFrame.runJavaScript reaches cross-origin frames, so the
+        # old window.frames SecurityError must not happen anymore.
+        Then the javascript message "Failed to style frame:*" should not be logged
 
     # :debug-webaction
 

@@ -80,6 +80,40 @@ def _iter_frames(frame: Any) -> Iterator[Any]:
         yield from _iter_frames(child)
 
 
+def _apply_stylesheet_to_frames(page: Any, css: str) -> bool:
+    """Apply the stylesheet to every frame via Qt's frame API.
+
+    window.frames cannot reach cross-origin frames (SecurityError), and such
+    frames can also miss the DocumentCreation stylesheet script, so the module
+    is installed on demand before set_css() runs. Returns False when the Qt
+    version has no QWebEngineFrame API (Qt < 6.8), so the caller can fall back
+    to the top frame.
+    """
+    main_frame = getattr(page, 'mainFrame', None)
+    if main_frame is None:
+        return False
+
+    module_js = javascript.wrap_global(
+        'stylesheet', resources.read_file('javascript/stylesheet.js'))
+    set_css = javascript.assemble('stylesheet', 'set_css', css, False, False)
+    code = (
+        '(function() {\n'
+        'if (!window._qutebrowser || !window._qutebrowser.stylesheet) {\n'
+        + module_js + '\n'
+        '}\n'
+        'if (window._qutebrowser && window._qutebrowser.stylesheet) {\n'
+        + set_css + '\n'
+        '}\n'
+        '})();'
+    )
+    world_id = int(QWebEngineScript.ScriptWorldId.ApplicationWorld)
+    for frame in _iter_frames(main_frame()):
+        if not frame.isValid():
+            continue
+        frame.runJavaScript(code, world_id)
+    return True
+
+
 class WebEngineAction(browsertab.AbstractAction):
 
     """QtWebEngine implementations related to web actions."""
@@ -1101,12 +1135,50 @@ class _WebEngineScripts(QObject):
     @pyqtSlot(bool)
     def _update_stylesheet(self, searching=False):
         """Update the custom stylesheet in existing tabs."""
+        css = self._stylesheet_css(searching=searching)
+        # Re-inject the script so the next document deterministically gets the
+        # full css at DocumentCreation (see _inject_stylesheet). This fixes the
+        # set_css() race on pages that load without an early <style> node
+        # (e.g. YouTube): a queued set_css() ran before the module
+        # initialization and the dynamic css was silently lost.
+        self._inject_stylesheet(css)
+        # Apply to the current document when the module is already initialized
+        # (e.g. after load_finished). While a load is in progress the
+        # re-injected script covers the new document, and running set_css()
+        # before module init would only produce a TypeError.
+        if not _apply_stylesheet_to_frames(self._widget.page(), css):
+            # Qt < 6.8: no QWebEngineFrame, stylesheet.js forwards to
+            # same-origin child frames itself.
+            code = javascript.assemble('stylesheet', 'set_css', css)
+            self._tab.run_js_async(
+                'if (window._qutebrowser && window._qutebrowser.stylesheet) {\n'
+                + code
+                + '\n}'
+            )
+
+    def _stylesheet_css(self, searching: bool = False) -> str:
+        """Return the full stylesheet css (dynamic css, then user stylesheet)."""
         css = shared.get_user_stylesheet(searching=searching)
         dynamic_css = '\n'.join(self._dynamic_css.values())
         if dynamic_css:
             css = dynamic_css + '\n' + css
-        code = javascript.assemble('stylesheet', 'set_css', css)
-        self._tab.run_js_async(code)
+        return css
+
+    def _inject_stylesheet(self, css: str) -> None:
+        """(Re-)inject the DocumentCreation stylesheet script carrying `css`.
+
+        Embedding the css in the script - instead of only applying it via a
+        later runJavaScript() call - makes it available deterministically at
+        document creation. The script-internal set_css() cannot race because
+        the module is initialized in the same script before the call.
+        """
+        self._remove_js('stylesheet')
+        js_code = javascript.wrap_global(
+            'stylesheet',
+            resources.read_file('javascript/stylesheet.js'),
+            javascript.assemble('stylesheet', 'set_css', css),
+        )
+        self._inject_js('stylesheet', js_code, subframes=True)
 
     def _inject_js(self, name, js_code, *,
                    world=_APPLICATION_WORLD,
@@ -1120,8 +1192,6 @@ class _WebEngineScripts(QObject):
         script.setRunsOnSubFrames(subframes)
         script.setName(f'_qute_{name}')
         self._widget.page().scripts().insert(script)
-        for script in self._web_scripts.values():
-            self._widget.page().scripts().insert(script)
 
     def _remove_js(self, name):
         """Remove an early QWebEngineScript."""
@@ -1131,6 +1201,17 @@ class _WebEngineScripts(QObject):
                 scripts.remove(script)
         else:  # Qt 5
             script = scripts.findScript(f'_qute_{name}')
+            if not script.isNull():
+                scripts.remove(script)
+
+    def _remove_scripts_by_name(self, name: str) -> None:
+        """Remove all scripts with the given name from the page collection."""
+        scripts = self._widget.page().scripts()
+        if machinery.IS_QT6:
+            for script in scripts.find(name):
+                scripts.remove(script)
+        else:  # Qt 5
+            script = scripts.findScript(name)
             if not script.isNull():
                 scripts.remove(script)
 
@@ -1155,16 +1236,9 @@ class _WebEngineScripts(QObject):
         """Initialize custom stylesheets.
 
         Partially inspired by QupZilla:
-        https://github.com/QupZilla/qupzilla/blob/v2.0/src/lib/app/mainapplication.cpp#L1063-L1101
+        https://github.com/QupZilla/qupzilla/blob/v2.0/src/lib/app/mainapplication.cpp#L1061-L1095
         """
-        self._remove_js('stylesheet')
-        css = shared.get_user_stylesheet()
-        js_code = javascript.wrap_global(
-            'stylesheet',
-            resources.read_file('javascript/stylesheet.js'),
-            javascript.assemble('stylesheet', 'set_css', css),
-        )
-        self._inject_js('stylesheet', js_code, subframes=True)
+        self._inject_stylesheet(self._stylesheet_css())
 
     @pyqtSlot()
     def _inject_all_greasemonkey_scripts(self):
@@ -1296,17 +1370,6 @@ class _WebEngineScripts(QObject):
     def remove_dynamic_css(self, name: str) -> None:
         self._dynamic_css.pop(name, None)
         self._update_stylesheet()
-
-    def _remove_scripts_by_name(self, name: str) -> None:
-        """Remove all scripts with the given name from the page collection."""
-        scripts = self._widget.page().scripts()
-        if machinery.IS_QT6:
-            for script in scripts.find(name):
-                scripts.remove(script)
-        else:  # Qt 5
-            script = scripts.findScript(name)
-            if not script.isNull():
-                scripts.remove(script)
 
     def add_web_script(self, name: str, js_code: str,
                        world: usertypes.JsWorld,
