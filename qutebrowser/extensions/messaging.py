@@ -492,8 +492,8 @@ def _probe(tab: Any, ok: bool) -> None:
         finish()
 
     page.runJavaScript(
-        "typeof qt !== 'undefined' || "
-        "typeof window._qutebrowser !== 'undefined'", 0, on_main)
+        "typeof qt !== 'undefined' && "
+        "typeof qt.webChannelTransport !== 'undefined'", 0, on_main)
     page.runJavaScript(
         "typeof qt !== 'undefined' && "
         "typeof qt.webChannelTransport !== 'undefined'",
