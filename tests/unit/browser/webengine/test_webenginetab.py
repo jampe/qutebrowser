@@ -232,8 +232,43 @@ class TestFindFlags:
         assert str(flags) == expected
 
 
-class TestWebEnginePermissions:
+class TestExtensionWebScripts:
 
+    """Tests for the extension-facing script API."""
+
+    @pytest.mark.qt_log_ignore('^GBM is not supported')
+    def test_add_web_script_defaults(self, webengine_tab):
+        webengine_tab.add_web_script('test-defaults', 'void 0;')
+        scripts = [
+            script for script in webengine_tab._widget.page().scripts().toList()
+            if script.name() == 'test-defaults'
+        ]
+        assert len(scripts) == 1
+        script = scripts[0]
+        assert script.worldId() == int(
+            QWebEngineScript.ScriptWorldId.ApplicationWorld)
+        assert script.injectionPoint() == (
+            QWebEngineScript.InjectionPoint.DocumentCreation)
+        assert not script.runsOnSubFrames()
+
+    def test_add_web_script_replaces_by_name(self, webengine_tab):
+        webengine_tab.add_web_script('test-replace', 'first();')
+        webengine_tab.add_web_script('test-replace', 'second();')
+        scripts = [
+            script for script in webengine_tab._widget.page().scripts().toList()
+            if script.name() == 'test-replace'
+        ]
+        assert len(scripts) == 1
+        assert scripts[0].sourceCode() == 'second();'
+
+    def test_run_js_async_name_is_logged(self, webengine_tab, caplog):
+        with caplog.at_level(logging.DEBUG, 'webview'):
+            webengine_tab.run_js_async('1 + 1;', name='test-label')
+        assert any('Running JS (test-label)' in msg
+                   for msg in caplog.messages)
+
+
+class TestWebEnginePermissions:
     def test_clipboard_value(self):
         # Ensure the ClipboardReadWrite permission is in the permission map,
         # despite us specifying it by number.

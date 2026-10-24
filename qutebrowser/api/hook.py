@@ -86,7 +86,7 @@ class before_load:
     """Decorator to get notified right before page loads.
 
     The decorated function gets called with two arguments `(tab, url)`. `tab` is the
-    :class:`qutebrowser.api.apitypes.Tab` instance which will do the loading. `url` is a
+    :class:`qutebrowser.api.apitypes.ExtensionTab` instance which will do the loading. `url` is a
     QUrl which represents the url that will be loaded.
 
     Don't expect to be able to do anything on the DOM during this hook.
@@ -114,7 +114,7 @@ class load_started:
     """Decorator to get notified right after page starts loading.
 
     The decorated function gets called with two arguments `(tab)`. `tab` is the
-    :class:`qutebrowser.api.apitypes.Tab` instance which has started loading.
+    :class:`qutebrowser.api.apitypes.ExtensionTab` instance which has started loading.
 
     Example::
 
@@ -137,7 +137,7 @@ class load_finished:
     """Decorator to get notified right after page finishing loading.
 
     The decorated function gets called with two arguments `(tab, ok)`. `tab` is the
-    :class:`qutebrowser.api.apitypes.Tab` instance which just finished loading, and `ok`
+    :class:`qutebrowser.api.apitypes.ExtensionTab` instance which just finished loading, and `ok`
     is a bool which is True when the page loaded correctly.
 
     Example::

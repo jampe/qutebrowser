@@ -916,19 +916,24 @@ class WebKitTab(browsertab.AbstractTab):
             callback(result)
 
     def add_dynamic_css(self, name: str, css: str) -> None:
-        raise NotImplementedError
+        """Does nothing on QtWebKit."""
 
     def remove_dynamic_css(self, name: str) -> None:
-        raise NotImplementedError
+        """Does nothing on QtWebKit."""
 
-    def add_web_script(self, name: str, js_code: str,
-                       world: usertypes.JsWorld,
-                       injection_point: usertypes.InjectionPoint,
-                       subframes: bool) -> None:
-        raise NotImplementedError
+    def add_web_script(
+            self,
+            name: str,
+            js_code: str, *,
+            world: usertypes.JsWorld | None = None,
+            injection_point: usertypes.InjectionPoint = (
+                usertypes.InjectionPoint.creation),
+            subframes: bool = False,
+    ) -> None:
+        """Does nothing on QtWebKit."""
 
     def remove_web_script(self, name: str) -> None:
-        raise NotImplementedError
+        """Does nothing on QtWebKit."""
 
     def icon(self):
         return self._widget.icon()

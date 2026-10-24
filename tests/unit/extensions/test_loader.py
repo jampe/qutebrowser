@@ -6,6 +6,8 @@ import types
 
 import pytest
 
+from qutebrowser.qt.core import QUrl
+
 from qutebrowser.extensions import loader
 from qutebrowser.misc import objects
 
@@ -120,3 +122,24 @@ def test_init_hook(hook, module):
     info = loader.ExtensionInfo(name='testmodule')
     loader._load_component(info)
     assert hook.called
+
+
+@pytest.mark.parametrize('runner_name, hook_attr, args', [
+    ('run_before_load_hooks', 'before_load_hooks', (QUrl('https://example.com/'),)),
+    ('run_load_started_hooks', 'load_started_hooks', ()),
+    ('run_load_finished_hooks', 'load_finished_hooks', (True,)),
+])
+def test_page_hooks_receive_adapter(module, runner_name, hook_attr, args):
+    calls = []
+    adapter = object()
+    tab = types.SimpleNamespace(api_adapter=lambda: adapter)
+
+    def hook(api_tab, *hook_args):
+        calls.append((api_tab, *hook_args))
+
+    setattr(module.info, hook_attr, [hook])
+    info = loader.ExtensionInfo(name='testmodule')
+    loader._load_component(info)
+    getattr(loader, runner_name)(tab, *args)
+
+    assert calls == [(adapter, *args)]

@@ -1057,6 +1057,9 @@ class AbstractTab(QWidget):
         self._tab_event_filter = eventfilter.TabEventFilter(
             self, parent=self)
         self.backend: usertypes.Backend | None = None
+        # Strongly owned canonical adapter for extension hooks; the adapter
+        # only keeps a weak reference back to this tab.
+        self._api_adapter: Any = None
 
         # If true, this tab has been requested to be removed (or is removed).
         self.pending_removal = False
@@ -1097,6 +1100,19 @@ class AbstractTab(QWidget):
 
         self._install_event_filter()
         self.zoom.apply_default()
+
+    def api_adapter(self) -> 'apitypes.ExtensionTab':
+        """Get the canonical extension-facing adapter for this tab.
+
+        The adapter is created lazily and stored on the tab, so it stays alive
+        exactly as long as the tab does. Components may hold it (or a weak
+        reference to it) across hook invocations.
+        """
+        if self._api_adapter is None:
+            # Import lazily to avoid a browsertab <-> apitypes module cycle.
+            from qutebrowser.api import apitypes
+            self._api_adapter = apitypes.ExtensionTab(self)
+        return self._api_adapter
 
     def _install_event_filter(self) -> None:
         raise NotImplementedError
@@ -1303,10 +1319,15 @@ class AbstractTab(QWidget):
     def remove_dynamic_css(self, name: str) -> None:
         raise NotImplementedError
 
-    def add_web_script(self, name: str, js_code: str,
-                       world: usertypes.JsWorld,
-                       injection_point: usertypes.InjectionPoint,
-                       subframes: bool) -> None:
+    def add_web_script(
+            self,
+            name: str,
+            js_code: str, *,
+            world: usertypes.JsWorld | None = None,
+            injection_point: usertypes.InjectionPoint = (
+                usertypes.InjectionPoint.creation),
+            subframes: bool = False,
+    ) -> None:
         raise NotImplementedError
 
     def remove_web_script(self, name: str) -> None:
