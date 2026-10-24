@@ -1298,6 +1298,7 @@ class AbstractTab(QWidget):
             code: str,
             callback: Callable[[Any], None] | None = None, *,
             world: usertypes.JsWorld | int | None = None,
+            frame: Any | None = None,
             name: str = '',
     ) -> None:
         """Run javascript async.
@@ -1310,7 +1311,14 @@ class AbstractTab(QWidget):
             callback: The callback to call with the result, or None.
             world: A world ID (int or usertypes.JsWorld member) to run the JS
                    in the main world or in another isolated world.
+            frame: A backend frame handle to run in, or None for the main
+                   frame.
+            name: A label used for debug logging.
         """
+        raise NotImplementedError
+
+    def frames(self) -> list[Any]:
+        """Get backend handles for the frames of the current document."""
         raise NotImplementedError
 
     def add_dynamic_css(self, name: str, css: str) -> None:

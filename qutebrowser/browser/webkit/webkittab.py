@@ -907,13 +907,19 @@ class WebKitTab(browsertab.AbstractTab):
         else:
             callback(frame.toHtml())
 
-    def run_js_async(self, code, callback=None, *, world=None,
+    def run_js_async(self, code, callback=None, *, world=None, frame=None,
                      name: str = ''):
+        if frame is not None:
+            raise browsertab.UnsupportedOperationError(
+                "Per-frame JavaScript is not supported on QtWebKit")
         if world is not None and world != usertypes.JsWorld.jseval:
             log.webview.warning("Ignoring world ID {}".format(world))
         result = self.private_api.run_js_sync(code)
         if callback is not None:
             callback(result)
+
+    def frames(self):
+        return []
 
     def add_dynamic_css(self, name: str, css: str) -> None:
         """Does nothing on QtWebKit."""

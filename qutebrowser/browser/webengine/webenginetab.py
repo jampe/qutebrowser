@@ -11,6 +11,7 @@ import dataclasses
 import re
 import html as html_utils
 from collections import OrderedDict
+from collections.abc import Iterator
 from typing import cast, TypeAlias
 
 from qutebrowser.qt.core import (pyqtSignal, pyqtSlot, Qt, QPoint, QPointF, QUrl,
@@ -58,6 +59,13 @@ def _convert_usertype_injection_point(injection_point: usertypes.InjectionPoint)
         usertypes.InjectionPoint.creation: QWebEngineScript.InjectionPoint.DocumentCreation,
     }
     return mapping[injection_point]
+
+
+def _iter_frames(frame: Any) -> Iterator[Any]:
+    """Yield a QWebEngineFrame and all its descendants."""
+    yield frame
+    for child in frame.children():
+        yield from _iter_frames(child)
 
 
 class WebEngineAction(browsertab.AbstractAction):
@@ -1439,7 +1447,8 @@ class WebEngineTab(browsertab.AbstractTab):
         else:
             self._widget.page().toHtml(callback)
 
-    def run_js_async(self, code, callback=None, *, world=None, name: str = ''):
+    def run_js_async(self, code, callback=None, *, world=None, frame=None,
+                     name: str = ''):
         if sip.isdeleted(self._widget):
             # https://github.com/qutebrowser/qutebrowser/issues/3895
             log.misc.debug("run_js_async called on deleted tab")
@@ -1460,10 +1469,33 @@ class WebEngineTab(browsertab.AbstractTab):
         else:
             world_id = _JS_WORLD_MAP[world]
 
+        if frame is not None:
+            if (version.qtwebengine_versions().webengine
+                    < utils.VersionNumber(6, 8)):
+                raise browsertab.UnsupportedOperationError(
+                    "Per-frame JavaScript requires QtWebEngine 6.8+")
+            if not frame.isValid():
+                raise browsertab.WebTabError("Frame is no longer valid")
+            if callback is None:
+                frame.runJavaScript(code, int(world_id))
+            else:
+                frame.runJavaScript(code, int(world_id), callback)
+            return
+
         if callback is None:
             self._widget.page().runJavaScript(code, world_id)
         else:
             self._widget.page().runJavaScript(code, world_id, callback)
+
+    def frames(self):
+        if (version.qtwebengine_versions().webengine
+                < utils.VersionNumber(6, 8)):
+            return []
+        page = self._widget.page()
+        main_frame = getattr(page, 'mainFrame', None)
+        if main_frame is None:
+            return []
+        return list(_iter_frames(main_frame()))
 
     def add_dynamic_css(self, name: str, css: str) -> None:
         self._scripts.add_dynamic_css(name, css)

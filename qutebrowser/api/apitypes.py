@@ -29,6 +29,64 @@ from qutebrowser.utils.usertypes import ClickTarget, JsWorld  # noqa: F401
 from qutebrowser.extensions.loader import InitContext  # noqa: F401
 
 
+class Frame:
+
+    """A backend-neutral handle for one frame of a tab.
+
+    Wraps a backend frame object; do not expose the raw QWebEngineFrame to
+    components. Frames are ephemeral: check ``is_valid`` before use and never
+    cache them across navigations.
+    """
+
+    def __init__(self, tab: 'ExtensionTab', raw: Any) -> None:
+        self._tab = tab
+        self._raw = raw
+        self._origin_override: str | None = None
+
+    def __repr__(self) -> str:
+        return f'<Frame tab={self._tab!r} url={self.url.toString()!r}>'
+
+    @property
+    def tab(self) -> 'ExtensionTab':
+        return self._tab
+
+    @property
+    def url(self) -> QUrl:
+        return self._raw.url()
+
+    @property
+    def origin(self) -> str | None:
+        if self._origin_override is not None:
+            return self._origin_override
+        return _url_origin(self.url)
+
+    @property
+    def is_main(self) -> bool:
+        return bool(self._raw.isMainFrame())
+
+    @property
+    def is_valid(self) -> bool:
+        return bool(self._raw.isValid())
+
+    @property
+    def _backend_frame(self) -> Any:
+        """The raw backend frame, for internal use only."""
+        return self._raw
+
+
+def _url_origin(url: QUrl) -> str | None:
+    """Get a normalized origin for a URL, or None for an opaque origin."""
+    scheme = url.scheme()
+    host = url.host()
+    if scheme not in {'http', 'https', 'ws', 'wss', 'ftp'} or not host:
+        return None
+    default_ports = {'http': 80, 'https': 443, 'ws': 80, 'wss': 443, 'ftp': 21}
+    port = url.port()
+    if port != -1 and port != default_ports[scheme]:
+        return f'{scheme}://{host}:{port}'
+    return f'{scheme}://{host}'
+
+
 class ExtensionTab:
 
     """Narrow tab API exposed to components/extensions.
@@ -100,12 +158,27 @@ class ExtensionTab:
     def remove_web_script(self, name: str) -> None:
         self._tab().remove_web_script(name)
 
+    def frames(self) -> list[Frame]:
+        """Get the frames of the current document.
+
+        Returns only the main frame on Qt < 6.8 or on the WebKit backend.
+        """
+        return [Frame(self, raw) for raw in self._tab().frames()]
+
     def run_js_async(
             self,
             code: str,
             callback: Callable[[Any], None] | None = None, *,
             world: JsWorld | None = None,
+            frame: Frame | None = None,
             name: str = '',
     ) -> None:
+        raw_frame = None
+        if frame is not None:
+            if frame.tab is not self:
+                raise WebTabError("Frame belongs to a different tab")
+            if not frame.is_valid:
+                raise WebTabError("Frame is no longer valid")
+            raw_frame = frame._backend_frame
         self._tab().run_js_async(
-            code, callback, world=world, name=name)
+            code, callback, world=world, frame=raw_frame, name=name)

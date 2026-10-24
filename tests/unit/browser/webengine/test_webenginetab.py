@@ -261,6 +261,13 @@ class TestExtensionWebScripts:
         assert len(scripts) == 1
         assert scripts[0].sourceCode() == 'second();'
 
+    @pytest.mark.qt_log_ignore('^GBM is not supported')
+    def test_frames_contains_main(self, webengine_tab):
+        frames = webengine_tab.frames()
+        if not frames:
+            pytest.skip("QWebEngineFrame API not available")
+        assert frames[0].isMainFrame()
+
     def test_run_js_async_name_is_logged(self, webengine_tab, caplog):
         with caplog.at_level(logging.DEBUG, 'webview'):
             webengine_tab.run_js_async('1 + 1;', name='test-label')
