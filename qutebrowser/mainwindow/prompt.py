@@ -315,6 +315,7 @@ class PromptContainer(QWidget):
             usertypes.PromptMode.yesno: YesNoPrompt,
             usertypes.PromptMode.text: LineEditPrompt,
             usertypes.PromptMode.user_pwd: AuthenticationPrompt,
+            usertypes.PromptMode.password: PasswordPrompt,
             usertypes.PromptMode.download: DownloadFilenamePrompt,
             usertypes.PromptMode.alert: AlertPrompt,
         }
@@ -633,6 +634,16 @@ class LineEditPrompt(_BasePrompt):
 
     def _allowed_commands(self):
         return [('prompt-accept', 'Accept'), ('mode-leave', 'Abort')]
+
+
+class PasswordPrompt(LineEditPrompt):
+
+    """A prompt for a single password value."""
+
+    def __init__(self, question, parent=None):
+        super().__init__(question, parent)
+        assert not question.default, question.default
+        self._lineedit.setEchoMode(QLineEdit.EchoMode.Password)
 
 
 class NullIconProvider(QFileIconProvider):

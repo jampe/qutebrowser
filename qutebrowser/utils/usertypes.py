@@ -225,6 +225,7 @@ class PromptMode(enum.Enum):
     yesno = enum.auto()
     text = enum.auto()
     user_pwd = enum.auto()
+    password = enum.auto()
     alert = enum.auto()
     download = enum.auto()
 
@@ -373,15 +374,18 @@ class Question(QObject):
               yesno: A question which can be answered with yes/no.
               text: A question which requires a free text answer.
               user_pwd: A question for a username and password.
+              password: A question for a single (masked) password.
         default: The default value.
                  For yesno, None (no default), True or False.
                  For text, a default text as string.
                  For user_pwd, a default username as string.
+                 For password, None.
         title: The question title to show.
         text: The prompt text to display to the user.
         url: Any URL referenced in prompts.
         option: Boolean option to be set when answering always/never.
-        answer: The value the user entered (as password for user_pwd).
+        answer: The value the user entered (as password for user_pwd, or the
+                password string for password).
         is_aborted: Whether the question was aborted.
         interrupted: Whether the question was interrupted by another one.
 

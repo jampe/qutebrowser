@@ -6,9 +6,37 @@ import os
 
 import pytest
 from qutebrowser.qt.core import Qt
+from qutebrowser.qt.widgets import QLineEdit
 
 from qutebrowser.mainwindow import prompt as promptmod
 from qutebrowser.utils import usertypes
+
+
+class TestPasswordPrompt:
+
+    def test_masks_and_returns_value(self, qtbot, config_stub,
+                                     key_config_stub):
+        question = usertypes.Question()
+        question.title = "Unlock"
+        question.mode = usertypes.PromptMode.password
+
+        prompt = promptmod.PasswordPrompt(question)
+        qtbot.add_widget(prompt)
+
+        assert prompt._lineedit.echoMode() == QLineEdit.EchoMode.Password
+        prompt._lineedit.setText("s3cret")
+        assert prompt.accept()
+        assert question.answer == "s3cret"
+
+    def test_accept_value(self, qtbot, config_stub, key_config_stub):
+        question = usertypes.Question()
+        question.title = "Unlock"
+        question.mode = usertypes.PromptMode.password
+
+        prompt = promptmod.PasswordPrompt(question)
+        qtbot.add_widget(prompt)
+        assert prompt.accept("from-command")
+        assert question.answer == "from-command"
 
 
 class TestFileCompletion:

@@ -25,6 +25,7 @@ Added
 - New component API for page integration: a narrow `ExtensionTab` adapter,
   per-frame `Frame` handles, and an ApplicationWorld messaging channel
   (`qutebrowser.api.messaging`) for isolated content scripts.
+- New password-only prompt mode for extensions/components.
 
 Removed
 ~~~~~~~
