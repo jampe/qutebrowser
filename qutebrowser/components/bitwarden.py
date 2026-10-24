@@ -483,30 +483,11 @@ class BitwardenComponent:
     def _ask_master_password(
             self, callback: Callable[[str | None], None]) -> None:
         """Ask for the master password only; the CLI session is already logged in."""
-        if shutil.which('rofi'):
-            process = subprocess.run(
-                ['rofi', '-dmenu', '-p', 'Bitwarden Master Password',
-                 '-password', '-lines', '0'],
-                text=True, capture_output=True, check=False)
-            callback(process.stdout.strip() if process.returncode == 0 else None)
-            return
-        if shutil.which('zenity'):
-            process = subprocess.run(
-                ['zenity', '--password', '--title',
-                 'Bitwarden Master Password'],
-                text=True, capture_output=True, check=False)
-            callback(process.stdout.strip() if process.returncode == 0 else None)
-            return
-
-        def on_answer(answer: Any) -> None:
-            callback(getattr(answer, 'password', None))
-
-        # Last resort: qutebrowser has no password-only prompt mode, so use the
-        # username/password prompt and ignore the username field.
         qmessage.ask_async(
-            "Bitwarden Master Password", usertypes.PromptMode.user_pwd,
-            on_answer,
-            text="Username is ignored; enter only the master password.")
+            "Bitwarden Master Password",
+            usertypes.PromptMode.password,
+            callback,
+        )
 
     def _lookup(self, url: str,
                 callback: Callable[[list[VaultItem] | None, str | None],
@@ -622,74 +603,3 @@ def bitwarden_autofill_on_load() -> None:
     enabled = component.toggle_autofill()
     message.info("Bitwarden page-load autofill: {}".format(
         "on" if enabled else "off"))
-
-
-@cmdutils.register()
-@cmdutils.argument('tab', value=cmdutils.Value.cur_tab)
-def bitwarden_fill(tab: apitypes.Tab) -> None:
-    """Pick a login for the current page and fill the main frame."""
-    component = _current()
-    if component is None:
-        return
-    adapter = tab.api_adapter()
-    if not adapter.messaging_supported:
-        message.error("Bitwarden messaging is not enabled")
-        return
-
-    def on_items(items: list[VaultItem] | None, error: str | None) -> None:
-        if error:
-            message.error("Bitwarden lookup failed: {}".format(error))
-            return
-        if not items:
-            message.info("No matching Bitwarden logins")
-            return
-        lines = ["{} | {}".format(item.name, item.username)
-                 for item in items]
-        choice = _dmenu(lines)
-        if not choice:
-            return
-        item = items[lines.index(choice)]
-        component._run(
-            lambda: component.vault.get_item(item.id),
-            functools.partial(_fill_picked_item, adapter, component, item))
-
-    component._lookup(adapter.url().toString(), on_items)
-
-
-def _dmenu(lines: list[str]) -> str | None:
-    for command in (['rofi', '-dmenu', '-i', '-p', 'Bitwarden'],
-                    ['dmenu', '-i', '-p', 'Bitwarden']):
-        if shutil.which(command[0]) is None:
-            continue
-        process = subprocess.run(
-            command, input="\n".join(lines), text=True,
-            capture_output=True, check=False)
-        if process.returncode == 0:
-            return process.stdout.strip() or None
-        return None
-    message.error("No rofi/dmenu available for Bitwarden picker")
-    return None
-
-
-def _fill_picked_item(adapter: apitypes.ExtensionTab,
-                      component: BitwardenComponent, item: VaultItem,
-                      _result: Any, error: str | None) -> None:
-    if error:
-        message.error("Bitwarden item lookup failed: {}".format(error))
-        return
-    totp = None
-    if item.totp:
-        try:
-            totp = component.vault.get_totp(item.id)
-        except VaultError as e:
-            log.extensions.warning("Bitwarden TOTP failed: %s", e)
-    try:
-        adapter.send_message({
-            'type': 'credentials',
-            'auto': False,
-            'username': item.username,
-            'password': item.password,
-            'totp': totp,
-        }, frame=None)
-    except Exception as e:  # noqa: BLE001
-        message.error("Bitwarden could not fill: {}".format(e))

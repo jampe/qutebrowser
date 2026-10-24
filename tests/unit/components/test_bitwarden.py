@@ -13,6 +13,7 @@ from qutebrowser.qt.core import QUrl
 
 from qutebrowser.components import bitwarden
 from qutebrowser.extensions import messaging
+from qutebrowser.utils import usertypes
 
 
 ITEMS = [
@@ -213,6 +214,18 @@ def test_unlock_uses_password_only(component):
     assert results == [(True, None)]
     assert component.vault.last_password == 'master'
     assert component.vault.unlocked
+
+
+def test_master_password_uses_builtin_prompt(component, monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        bitwarden.qmessage, 'ask_async',
+        lambda title, mode, handler, **kwargs: (
+            calls.append((title, mode)), handler('master')))
+    results = []
+    component._ask_master_password(results.append)
+    assert calls == [('Bitwarden Master Password', usertypes.PromptMode.password)]
+    assert results == ['master']
 
 
 def test_master_password_empty_cancels(component):
