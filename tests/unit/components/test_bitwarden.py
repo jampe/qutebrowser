@@ -168,30 +168,115 @@ def test_auto_fill_toggle(component, tab, frame):
     assert component.toggle_autofill() is True
 
 
-def test_bw_session_from_env(monkeypatch):
+def test_bwserve_session_from_env(monkeypatch):
     monkeypatch.setenv('BW_SESSION', 'session-value')
-    vault = bitwarden.BwCliVault()
+    vault = bitwarden.BwServeVault()
+    try:
+        assert vault.unlocked
+        assert vault._session == 'session-value'  # noqa: SLF001
+    finally:
+        vault.close()
+
+
+def test_bwserve_list_items(monkeypatch):
+    vault = bitwarden.BwServeVault()
+    raw = {
+        'id': '1',
+        'name': 'Example',
+        'login': {
+            'username': 'alice',
+            'password': 'secret',
+            'totp': None,
+            'uris': [{'uri': 'https://example.com/'}],
+        },
+    }
+    calls = []
+
+    def request(method, path, **kwargs):
+        calls.append((method, path))
+        return {'object': 'list', 'data': [raw]}
+
+    monkeypatch.setattr(vault, '_request', request)
+    items = vault.list_items('https://example.com/login')
+
+    assert calls == [(
+        'GET',
+        '/list/object/items?url=https%3A%2F%2Fexample.com%2Flogin',
+    )]
+    assert [item.id for item in items] == ['1']
+    assert items[0].username == 'alice'
+    vault.close()
+
+
+def test_bwserve_get_item_and_totp(monkeypatch):
+    vault = bitwarden.BwServeVault()
+    raw = {
+        'id': '1',
+        'name': 'Example',
+        'login': {'username': 'alice', 'password': 'secret'},
+    }
+
+    def request(method, path, **kwargs):
+        if path.endswith('/totp/1'):
+            return {'object': 'string', 'data': '123456'}
+        return raw
+
+    monkeypatch.setattr(vault, '_request', request)
+    assert vault.get_item('1').password == 'secret'
+    assert vault.get_totp('1') == '123456'
+    vault.close()
+
+
+def test_bwserve_unlock_and_lock(monkeypatch):
+    monkeypatch.delenv('BW_SESSION', raising=False)
+    vault = bitwarden.BwServeVault()
+    calls = []
+
+    def request(method, path, **kwargs):
+        calls.append((method, path, kwargs.get('data')))
+        return {'object': 'message', 'raw': 'new-session'}
+
+    monkeypatch.setattr(vault, '_request', request)
+    assert vault.unlock('master')
     assert vault.unlocked
-    assert vault._session == 'session-value'  # noqa: SLF001
-    assert vault._session_from_env  # noqa: SLF001
+    assert vault._session == 'new-session'  # noqa: SLF001
+
+    vault.lock()
+    assert not vault.unlocked
+    assert calls == [('POST', '/unlock', {'password': 'master'})]
+    vault.close()
 
 
-def test_bw_invalid_session_clears(monkeypatch):
-    monkeypatch.setenv('BW_SESSION', 'stale')
+def test_bwserve_invalid_session_clears(monkeypatch):
+    monkeypatch.delenv('BW_SESSION', raising=False)
+    vault = bitwarden.BwServeVault()
+    vault._session = 'stale'  # noqa: SLF001
+    vault._unlocked = True  # noqa: SLF001
+    vault._port = 1  # noqa: SLF001
+    monkeypatch.setattr(vault, '_ensure_started', lambda: None)
 
-    class Result:
-        returncode = 1
-        stdout = ''
-        stderr = 'Invalid session.'
+    class Response:
+        status = 400
 
-    vault = bitwarden.BwCliVault()
-    vault._bw = '/bin/true'  # noqa: SLF001
-    monkeypatch.setattr(bitwarden.subprocess, 'run',
-                        lambda *args, **kwargs: Result())
-    with pytest.raises(bitwarden.VaultError, match='Invalid session'):
+        def read(self):
+            return b'{"success":false,"message":"Vault is locked."}'
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    class Opener:
+        def open(self, request, timeout=None):
+            return Response()
+
+    monkeypatch.setattr(vault, '_opener', Opener())
+    with pytest.raises(bitwarden.VaultError, match='Vault is locked'):
         vault.list_items('example.com')
     assert not vault.unlocked
     assert vault._session is None  # noqa: SLF001
+    vault.close()
 
 
 def test_fake_vault_matches_subdomains():

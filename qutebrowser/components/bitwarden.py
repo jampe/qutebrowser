@@ -5,18 +5,23 @@
 """Bitwarden component POC.
 
 Page integration only: content-script field discovery, an inline menu, login
-fill, page-load autofill and TOTP. Vault access goes through the ``bw`` CLI (or
-a fake JSON vault for tests/demos).
+fill, page-load autofill and TOTP. Vault access goes through a long-running
+``bw serve`` process (or a fake JSON vault for tests/demos).
 """
 
+import atexit
 import functools
 import itertools
 import json
 import os
 import shutil
+import socket
 import subprocess
 import threading
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from dataclasses import dataclass, field
 from typing import Any, Callable
 from urllib.parse import urlparse
@@ -122,80 +127,208 @@ def _is_session_error(error: str) -> bool:
         'invalid session', 'session key', 'vault is locked', 'not logged in'))
 
 
-class BwCliVault:
+class BwServeVault:
+
+    """Vault backed by a long-running ``bw serve`` HTTP API."""
+
+    _START_TIMEOUT = 10.0
+    _REQUEST_TIMEOUT = 10.0
+    _SYNC_TIMEOUT = 60.0
 
     def __init__(self) -> None:
         self._bw = shutil.which('bw')
         self._session = os.environ.get('BW_SESSION') or None
-        self._session_from_env = self._session is not None
+        self._unlocked = self._session is not None
+        self._process: subprocess.Popen[str] | None = None
+        self._port: int | None = None
+        self._ready = threading.Event()
+        self._start_lock = threading.Lock()
+        self._opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler({}))
+        atexit.register(self.close)
 
     @property
     def unlocked(self) -> bool:
-        return self._session is not None
+        return self._unlocked
 
-    def _run(self, *args: str) -> str:
-        if self._bw is None:
-            raise VaultError("Bitwarden CLI ('bw') not found")
-        process = subprocess.run(
-            [self._bw, *args],
-            text=True, capture_output=True, check=False)
-        if process.returncode:
-            error = process.stderr.strip() or process.stdout.strip()
-            if self._session is not None and _is_session_error(error):
-                self._session = None
-                self._session_from_env = False
-            raise VaultError(error or "Bitwarden CLI failed")
-        return process.stdout
+    @staticmethod
+    def _free_port() -> int:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind(('127.0.0.1', 0))
+            return sock.getsockname()[1]
+
+    def _ensure_started(self) -> None:
+        process = self._process
+        if (process is not None and process.poll() is None
+                and self._ready.is_set()):
+            return
+        with self._start_lock:
+            process = self._process
+            if (process is not None and process.poll() is None
+                    and self._ready.is_set()):
+                return
+            if self._bw is None:
+                raise VaultError("Bitwarden CLI ('bw') not found")
+            self._stop_process()
+            port = self._free_port()
+            env = os.environ.copy()
+            if self._session is not None:
+                env['BW_SESSION'] = self._session
+            else:
+                env.pop('BW_SESSION', None)
+            try:
+                self._process = subprocess.Popen(
+                    [self._bw, 'serve', '--hostname', '127.0.0.1',
+                     '--port', str(port)],
+                    env=env, stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    text=True)
+            except OSError as e:
+                raise VaultError(
+                    "Could not start 'bw serve': {}".format(e)) from e
+            self._port = port
+            try:
+                self._wait_until_ready()
+            except Exception:
+                self._stop_process()
+                raise
+            self._ready.set()
+
+    def _stop_process(self) -> None:
+        self._ready.clear()
+        process = self._process
+        self._process = None
+        self._port = None
+        if process is None or process.poll() is not None:
+            return
+        process.terminate()
+        try:
+            process.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+
+    def close(self) -> None:
+        with self._start_lock:
+            self._stop_process()
+
+    def _wait_until_ready(self) -> None:
+        deadline = time.monotonic() + self._START_TIMEOUT
+        while True:
+            process = self._process
+            if process is None or process.poll() is not None:
+                raise VaultError("Bitwarden serve exited during startup")
+            try:
+                self._request('GET', '/status', ensure_started=False,
+                              timeout=0.5)
+                return
+            except VaultError:
+                if time.monotonic() >= deadline:
+                    raise VaultError(
+                        "Timed out waiting for Bitwarden serve") from None
+                time.sleep(0.05)
+
+    def _handle_error(self, message: str) -> None:
+        if _is_session_error(message):
+            self._unlocked = False
+            self._session = None
+
+    def _request(self, method: str, path: str, *,
+                 data: dict[str, Any] | None = None,
+                 timeout: float = _REQUEST_TIMEOUT,
+                 ensure_started: bool = True) -> Any:
+        if ensure_started:
+            self._ensure_started()
+        if self._port is None:
+            raise VaultError("Bitwarden serve is not running")
+        url = 'http://127.0.0.1:{}{}'.format(self._port, path)
+        body = None
+        if data is not None:
+            body = json.dumps(data).encode('utf-8')
+        request = urllib.request.Request(url, data=body, method=method)
+        if body is not None:
+            request.add_header('Content-Type', 'application/json')
+        try:
+            with self._opener.open(request, timeout=timeout) as response:
+                raw = response.read()
+                status = response.status
+        except urllib.error.HTTPError as e:
+            raw = e.read()
+            status = e.code
+        except (urllib.error.URLError, OSError) as e:
+            raise VaultError(
+                "Bitwarden serve request failed: {}".format(e)) from e
+
+        try:
+            payload = json.loads(raw.decode('utf-8'))
+        except (UnicodeDecodeError, ValueError) as e:
+            raise VaultError(
+                "Bitwarden serve returned invalid JSON") from e
+        if not isinstance(payload, dict):
+            raise VaultError("Bitwarden serve returned an invalid response")
+        if status >= 400 or not payload.get('success'):
+            message = str(payload.get('message') or
+                          "Bitwarden serve returned HTTP {}".format(status))
+            self._handle_error(message)
+            raise VaultError(message)
+        return payload.get('data')
 
     def unlock(self, password: str | None = None) -> bool:
-        if password is None:
+        if not password:
             raise VaultError("No master password")
-        env = {**os.environ, 'BW_MASTERPASS': password}
-        if self._bw is None:
-            raise VaultError("Bitwarden CLI ('bw') not found")
-        process = subprocess.run(
-            [self._bw, 'unlock', '--raw', '--passwordenv', 'BW_MASTERPASS'],
-            env=env, text=True, capture_output=True, check=False)
-        if process.returncode:
-            raise VaultError(process.stderr.strip() or "Unlock failed")
-        self._session = process.stdout.strip()
-        self._session_from_env = False
-        return bool(self._session)
-
-    def _session_args(self) -> list[str]:
-        if self._session is None:
-            raise VaultError("Vault is locked")
-        return ['--nointeraction', '--session', self._session]
+        data = self._request(
+            'POST', '/unlock', data={'password': password}, timeout=60)
+        self._unlocked = True
+        if isinstance(data, dict) and isinstance(data.get('raw'), str):
+            self._session = data['raw']
+        return True
 
     def list_items(self, url: str) -> list[VaultItem]:
-        output = self._run(
-            'list', 'items', *self._session_args(), '--url', url)
-        raw = json.loads(output)
-        items = [_normalize_item(item) for item in raw]
+        query = urllib.parse.urlencode({'url': url})
+        data = self._request('GET', '/list/object/items?' + query)
+        if not isinstance(data, dict):
+            raise VaultError("Bitwarden serve returned an invalid item list")
+        raw = data.get('data')
+        if not isinstance(raw, list):
+            raise VaultError("Bitwarden serve returned an invalid item list")
+        items = [_normalize_item(item) for item in raw
+                 if isinstance(item, dict)]
         return [item for item in items
                 if item is not None and (item.username or item.password)]
 
     def get_item(self, item_id: str) -> VaultItem:
-        output = self._run('get', 'item', item_id, *self._session_args())
-        item = _normalize_item(json.loads(output))
+        path = '/object/item/' + urllib.parse.quote(item_id, safe='')
+        data = self._request('GET', path)
+        if not isinstance(data, dict):
+            raise VaultError("Item has no login")
+        item = _normalize_item(data)
         if item is None:
             raise VaultError("Item has no login")
         return item
 
     def get_totp(self, item_id: str) -> str | None:
-        return self._run('get', 'totp', item_id, *self._session_args()).strip()
+        path = '/object/totp/' + urllib.parse.quote(item_id, safe='')
+        data = self._request('GET', path)
+        if isinstance(data, dict):
+            data = data.get('data')
+        if data is None:
+            return None
+        code = str(data).strip()
+        return code or None
 
     def sync(self) -> None:
-        self._run('sync', *self._session_args())
+        self._request('POST', '/sync', timeout=self._SYNC_TIMEOUT)
 
     def lock(self) -> None:
+        process = self._process
+        self._unlocked = False
         self._session = None
-        self._session_from_env = False
-        if self._bw is not None:
-            try:
-                self._run('lock')
-            except VaultError:
-                pass
+        if process is None or process.poll() is not None:
+            return
+        try:
+            self._request('POST', '/lock', timeout=5)
+        except VaultError:
+            pass
 
 
 class _AsyncSignals(QObject):
@@ -258,7 +391,7 @@ class BitwardenComponent:
         path = os.environ.get('QUTE_BITWARDEN_FAKE_VAULT')
         if path:
             return FakeVault.from_file(path)
-        return BwCliVault()
+        return BwServeVault()
 
     @property
     def vault(self) -> Any:
