@@ -156,7 +156,8 @@ def ask(*args: Any, **kwargs: Any) -> Any:
 
 def ask_async(title: str,
               mode: usertypes.PromptMode,
-              handler: Callable[[Any], None],
+              handler: Callable[[Any], None], *,
+              cancelled: Callable[[], None] | None = None,
               **kwargs: Any) -> None:
     """Ask an async question in the statusbar.
 
@@ -164,11 +165,16 @@ def ask_async(title: str,
         title: The message to display to the user.
         mode: A PromptMode.
         handler: The function to get called with the answer as argument.
+        cancelled: An optional function called when the prompt is cancelled or
+                   aborted.
         default: The default value to display.
         text: Additional text to show.
     """
     question = _build_question(title, mode=mode, **kwargs)
     question.answered.connect(handler)
+    if cancelled is not None:
+        question.cancelled.connect(cancelled)
+        question.aborted.connect(cancelled)
     question.completed.connect(question.deleteLater)
     global_bridge.ask(question, blocking=False)
 
