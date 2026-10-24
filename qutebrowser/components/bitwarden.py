@@ -74,6 +74,8 @@ class FakeVault:
 
     def __init__(self, items: list[VaultItem]) -> None:
         self._items = {item.id: item for item in items}
+        self._unlocked = True
+        self.last_password: str | None = None
 
     @classmethod
     def from_file(cls, path: str) -> 'FakeVault':
@@ -84,9 +86,11 @@ class FakeVault:
 
     @property
     def unlocked(self) -> bool:
-        return True
+        return self._unlocked
 
     def unlock(self, password: str | None = None) -> bool:
+        self.last_password = password
+        self._unlocked = True
         return True
 
     def list_items(self, url: str) -> list[VaultItem]:
@@ -108,7 +112,7 @@ class FakeVault:
         pass
 
     def lock(self) -> None:
-        pass
+        self._unlocked = False
 
 
 class BwCliVault:
@@ -462,8 +466,35 @@ class BitwardenComponent:
                 lambda: self._vault.unlock(str(password)),
                 lambda _result, error: callback(error is None, error))
 
+        self._ask_master_password(on_password)
+
+    def _ask_master_password(
+            self, callback: Callable[[str | None], None]) -> None:
+        """Ask for the master password only; the CLI session is already logged in."""
+        if shutil.which('rofi'):
+            process = subprocess.run(
+                ['rofi', '-dmenu', '-p', 'Bitwarden Master Password',
+                 '-password', '-lines', '0'],
+                text=True, capture_output=True, check=False)
+            callback(process.stdout.strip() if process.returncode == 0 else None)
+            return
+        if shutil.which('zenity'):
+            process = subprocess.run(
+                ['zenity', '--password', '--title',
+                 'Bitwarden Master Password'],
+                text=True, capture_output=True, check=False)
+            callback(process.stdout.strip() if process.returncode == 0 else None)
+            return
+
+        def on_answer(answer: Any) -> None:
+            callback(getattr(answer, 'password', None))
+
+        # Last resort: qutebrowser has no password-only prompt mode, so use the
+        # username/password prompt and ignore the username field.
         qmessage.ask_async(
-            "Unlock Bitwarden", usertypes.PromptMode.user_pwd, on_password)
+            "Bitwarden Master Password", usertypes.PromptMode.user_pwd,
+            on_answer,
+            text="Username is ignored; enter only the master password.")
 
     def _lookup(self, url: str,
                 callback: Callable[[list[VaultItem] | None, str | None],

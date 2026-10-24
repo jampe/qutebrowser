@@ -179,6 +179,24 @@ def test_status(component):
     assert 'FakeVault' in component.status()
 
 
+def test_unlock_uses_password_only(component):
+    component.vault.lock()
+    component._ask_master_password = lambda callback: callback('master')
+    results = []
+    component._ensure_unlocked(lambda ok, error: results.append((ok, error)))
+    assert results == [(True, None)]
+    assert component.vault.last_password == 'master'
+    assert component.vault.unlocked
+
+
+def test_master_password_empty_cancels(component):
+    component.vault.lock()
+    component._ask_master_password = lambda callback: callback(None)
+    results = []
+    component._ensure_unlocked(lambda ok, error: results.append((ok, error)))
+    assert results == [(False, 'Unlock cancelled')]
+
+
 def test_filled_event_is_accepted(component, tab, frame):
     message = make_message(
         tab, frame, 'filled', {'auto': True})
