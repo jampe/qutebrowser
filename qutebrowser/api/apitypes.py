@@ -88,16 +88,26 @@ def _url_origin(url: QUrl) -> str | None:
 
 
 def _is_same_site(first: QUrl, second: QUrl) -> bool:
-    """Approximate same-site check for secret delivery.
+    """Conservative same-site check for secret delivery.
 
-    Without a PSL dependency this is deliberately conservative: exact host or
-    a parent/child host relationship on the same scheme.
+    Without a PSL dependency this requires the same scheme, an exact or
+    parent/child host relationship, and the same effective port. Different
+    ports are different origins and must not receive secrets.
     """
     first_origin = _url_origin(first)
     second_origin = _url_origin(second)
     if first_origin is None or second_origin is None:
         return False
     if first.scheme() != second.scheme():
+        return False
+    default_ports = {'http': 80, 'https': 443, 'ws': 80, 'wss': 443, 'ftp': 21}
+    first_port = first.port()
+    if first_port == -1:
+        first_port = default_ports.get(first.scheme(), -1)
+    second_port = second.port()
+    if second_port == -1:
+        second_port = default_ports.get(second.scheme(), -1)
+    if first_port != second_port:
         return False
     first_host = first.host()
     second_host = second.host()
