@@ -152,7 +152,7 @@ class _CosmeticInfo:
 class _SurveyorState:
     """Per-tab state for continuous generic cosmetic filtering."""
 
-    tab_ref: "weakref.ReferenceType[apitypes.Tab]"
+    tab_ref: "weakref.ReferenceType[apitypes.ExtensionTab]"
     exceptions: Set[str]
     selectors: Set[str] = dataclasses.field(default_factory=set)
     draining: bool = False
@@ -197,7 +197,7 @@ def _drain_surveyors() -> None:
         _surveyor_timer.stop()
 
 
-def _drain_surveyor(tab: apitypes.Tab, state: _SurveyorState) -> None:
+def _drain_surveyor(tab: apitypes.ExtensionTab, state: _SurveyorState) -> None:
     """Ask the page's surveyor for newly seen class/id tokens."""
     if state.draining:
         if (state.drain_started is not None
@@ -542,13 +542,13 @@ def on_method_changed() -> None:
 
 
 @hook.before_load()
-def add_cosmetic_filters(tab: apitypes.Tab, url: QUrl) -> None:
+def add_cosmetic_filters(tab: apitypes.ExtensionTab, url: QUrl) -> None:
     """Inject adblock css and scriptlets for the url we are about to load."""
     if ad_blocker is None:
         return
 
-    last_navigation = tab.data.last_navigation
-    if last_navigation is not None and last_navigation.url != url:
+    last_navigation_url = tab.last_navigation_url
+    if last_navigation_url is not None and last_navigation_url != url:
         # Subframe navigation: page-wide scripts are injected once for the
         # main frame and run in subframes, so per-frame resources must not
         # replace them mid-load.
@@ -635,7 +635,7 @@ def add_cosmetic_filters(tab: apitypes.Tab, url: QUrl) -> None:
 
 
 @hook.load_finished()
-def update_cosmetic_filters(tab: apitypes.Tab, ok: bool) -> None:
+def update_cosmetic_filters(tab: apitypes.ExtensionTab, ok: bool) -> None:
     """After loading a page, start scanning for generic selectors."""
     if ad_blocker is None or not ok:
         return
@@ -672,7 +672,7 @@ def update_cosmetic_filters(tab: apitypes.Tab, ok: bool) -> None:
 
 
 @hook.load_started()
-def reset_surveyor(tab: apitypes.Tab) -> None:
+def reset_surveyor(tab: apitypes.ExtensionTab) -> None:
     """Drop the previous document's generic-filter surveyor state."""
     if ad_blocker is None:
         return

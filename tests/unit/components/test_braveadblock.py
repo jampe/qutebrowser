@@ -1008,7 +1008,7 @@ def test_url_specific_cosmetic_filters(
 def _make_mock_tab(tab_id=0):
     tab = MagicMock()
     tab.tab_id = tab_id
-    tab.data.last_navigation = None
+    tab.last_navigation_url = None
     return tab
 
 
@@ -1138,6 +1138,7 @@ def surveyor():
 def _make_js_tab(tab_id=0, drain_result=None):
     tab = MagicMock()
     tab.tab_id = tab_id
+    tab.last_navigation_url = None
     tab.url.return_value = QUrl("https://example.com")
 
     def run_js_async(code, callback=None, **kwargs):
@@ -1347,7 +1348,7 @@ def test_read_cache_loads_scriptlet_resources(
 def test_add_cosmetic_filters_skips_subframes(surveyor):
     url = QUrl("https://iframe.example/")
     tab = _make_js_tab()
-    tab.data.last_navigation = SimpleNamespace(url=QUrl("https://example.com/"))
+    tab.last_navigation_url = QUrl("https://example.com/")
 
     braveadblock.add_cosmetic_filters(tab, url)
 
@@ -1359,7 +1360,7 @@ def test_add_cosmetic_filters_skips_subframes(surveyor):
 def test_add_cosmetic_filters_main_frame(surveyor):
     url = QUrl("https://example.com/")
     tab = _make_js_tab()
-    tab.data.last_navigation = SimpleNamespace(url=url)
+    tab.last_navigation_url = url
     surveyor.url_cosmetic_resources.return_value = SimpleNamespace(
         hide_selectors=[],
         procedural_actions=set(),
