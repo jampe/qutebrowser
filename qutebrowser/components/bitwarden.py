@@ -53,15 +53,25 @@ def _normalize_item(raw: dict[str, Any]) -> VaultItem | None:
     login = raw.get('login') or {}
     if not isinstance(login, dict):
         return None
+    uris = login.get('uris')
+    if not isinstance(uris, list):
+        uris = raw.get('uris', [])
     return VaultItem(
         id=str(raw.get('id', '')),
         name=str(raw.get('name', '')),
         username=str(login.get('username') or ''),
         password=str(login.get('password') or ''),
         totp=login.get('totp') or None,
-        uris=[str(uri.get('uri', '')) for uri in raw.get('uris', [])
+        uris=[str(uri.get('uri', '')) for uri in uris
               if isinstance(uri, dict) and uri.get('uri')],
     )
+
+
+def _origin(url: str) -> str:
+    parsed = urlparse(url)
+    if not parsed.scheme or not parsed.netloc:
+        return url
+    return '{}://{}/'.format(parsed.scheme, parsed.netloc)
 
 
 def _hosts_match(candidate: str, target: str) -> bool:
@@ -76,11 +86,23 @@ def _hosts_match(candidate: str, target: str) -> bool:
             or target_host.endswith('.' + candidate_host))
 
 
+def _form_blocks_autofill(form: Any) -> bool:
+    if not isinstance(form, dict):
+        return False
+    try:
+        count = int(form.get('password_count') or 0)
+    except (TypeError, ValueError):
+        count = 0
+    return bool(form.get('registration') or form.get('new_password')
+                or count >= 2)
+
+
 class FakeVault:
 
     def __init__(self, items: list[VaultItem]) -> None:
         self._items = {item.id: item for item in items}
         self._unlocked = True
+        self._next_id = len(items) + 1
         self.last_password: str | None = None
 
     @classmethod
@@ -114,6 +136,34 @@ class FakeVault:
     def get_totp(self, item_id: str) -> str | None:
         return self.get_item(item_id).totp
 
+    def create_login(self, url: str, username: str,
+                     password: str) -> VaultItem:
+        parsed = urlparse(url)
+        host = parsed.hostname or 'login'
+        item_id = 'fake-{}'.format(self._next_id)
+        self._next_id += 1
+        while item_id in self._items:
+            item_id = 'fake-{}'.format(self._next_id)
+            self._next_id += 1
+        item = VaultItem(
+            id=item_id, name=host, username=username, password=password,
+            uris=[_origin(url)])
+        self._items[item_id] = item
+        return item
+
+    def update_login(self, item_id: str, *, username: str,
+                     password: str, url: str) -> VaultItem:
+        item = self.get_item(item_id)
+        uris = list(item.uris)
+        origin = _origin(url)
+        if not any(_hosts_match(uri, origin) for uri in uris):
+            uris.append(origin)
+        updated = VaultItem(
+            id=item.id, name=item.name, username=username, password=password,
+            totp=item.totp, uris=uris)
+        self._items[item.id] = updated
+        return updated
+
     def sync(self) -> None:
         pass
 
@@ -125,6 +175,94 @@ def _is_session_error(error: str) -> bool:
     lowered = error.lower()
     return any(token in lowered for token in (
         'invalid session', 'session key', 'vault is locked', 'not logged in'))
+
+
+def _bool_option(options: dict[str, Any], key: str) -> bool:
+    return bool(options.get(key, False))
+
+
+def _int_option(options: dict[str, Any], key: str, default: int) -> int:
+    value = options.get(key, default)
+    try:
+        return int(value)
+    except (TypeError, ValueError) as e:
+        raise VaultError("Invalid generator option: {}".format(key)) from e
+
+
+def _password_args(options: dict[str, Any], bw: str) -> list[str]:
+    length = _int_option(options, 'length', 14)
+    if length < 5 or length > 128:
+        raise VaultError("Password length must be between 5 and 128")
+    classes = [
+        ('uppercase', '-u'),
+        ('lowercase', '-l'),
+        ('number', '-n'),
+        ('special', '-s'),
+    ]
+    selected = [flag for key, flag in classes if _bool_option(options, key)]
+    if not selected:
+        raise VaultError("Select at least one character set")
+    args = [bw, 'generate', *selected, '--length', str(length)]
+    min_number = _int_option(options, 'minNumber', 0)
+    min_special = _int_option(options, 'minSpecial', 0)
+    if min_number < 0 or min_number > length:
+        raise VaultError("Invalid minimum number count")
+    if min_special < 0 or min_special > length:
+        raise VaultError("Invalid minimum special count")
+    if min_number:
+        args.extend(['--minNumber', str(min_number)])
+    if min_special:
+        args.extend(['--minSpecial', str(min_special)])
+    if _bool_option(options, 'ambiguous'):
+        args.append('--ambiguous')
+    return args
+
+
+def _passphrase_args(options: dict[str, Any], bw: str) -> list[str]:
+    words = _int_option(options, 'words', 3)
+    if words < 3:
+        raise VaultError("Passphrase must use at least 3 words")
+    separator = options.get('separator', '-')
+    if separator not in ('space', 'empty') and (
+            not isinstance(separator, str) or len(separator) != 1):
+        raise VaultError("Invalid passphrase separator")
+    args = [bw, 'generate', '-p', '--words', str(words),
+            '--separator={}'.format(separator)]
+    if _bool_option(options, 'capitalize'):
+        args.append('-c')
+    if _bool_option(options, 'includeNumber'):
+        args.append('--includeNumber')
+    return args
+
+
+def generate_password(options: dict[str, Any]) -> str:
+    """Generate a password or passphrase with the Bitwarden CLI."""
+    bw = shutil.which('bw')
+    if bw is None:
+        raise VaultError("Bitwarden CLI ('bw') not found")
+    if not isinstance(options, dict):
+        raise VaultError("Invalid generator options")
+
+    mode = options.get('mode', 'password')
+    if mode == 'password':
+        args = _password_args(options, bw)
+    elif mode == 'passphrase':
+        args = _passphrase_args(options, bw)
+    else:
+        raise VaultError("Invalid generator mode")
+
+    try:
+        process = subprocess.run(
+            args, capture_output=True, text=True, timeout=10, check=False)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise VaultError("Bitwarden generator failed: {}".format(e)) from e
+    output = process.stdout.strip()
+    if process.returncode or not output:
+        error = process.stderr.strip() or "Bitwarden generator failed"
+        raise VaultError(error)
+    if '\n' in output or '\r' in output:
+        raise VaultError("Bitwarden generator returned invalid output")
+    return output
 
 
 class BwServeVault:
@@ -316,6 +454,62 @@ class BwServeVault:
         code = str(data).strip()
         return code or None
 
+    def get_raw_item(self, item_id: str) -> dict[str, Any]:
+        path = '/object/item/' + urllib.parse.quote(item_id, safe='')
+        data = self._request('GET', path)
+        if not isinstance(data, dict):
+            raise VaultError("Bitwarden serve returned an invalid item")
+        return data
+
+    def create_login(self, url: str, username: str,
+                     password: str) -> VaultItem:
+        parsed = urlparse(url)
+        host = parsed.hostname or 'login'
+        payload = {
+            'type': 1,
+            'name': host,
+            'favorite': False,
+            'notes': None,
+            'login': {
+                'uris': [{'uri': _origin(url)}],
+                'username': username,
+                'password': password,
+                'totp': None,
+            },
+        }
+        data = self._request(
+            'POST', '/object/item', data=payload, timeout=self._SYNC_TIMEOUT)
+        item = _normalize_item(data) if isinstance(data, dict) else None
+        if item is None:
+            raise VaultError("Bitwarden serve returned an invalid item")
+        return item
+
+    def update_login(self, item_id: str, *, username: str,
+                     password: str, url: str) -> VaultItem:
+        raw = self.get_raw_item(item_id)
+        login = raw.get('login')
+        if not isinstance(login, dict):
+            login = {}
+        login['username'] = username
+        login['password'] = password
+        uris = login.get('uris')
+        if not isinstance(uris, list):
+            uris = []
+        origin = _origin(url)
+        if not any(isinstance(uri, dict) and
+                   _hosts_match(str(uri.get('uri', '')), origin)
+                   for uri in uris):
+            uris.append({'uri': origin})
+        login['uris'] = uris
+        raw['login'] = login
+        path = '/object/item/' + urllib.parse.quote(item_id, safe='')
+        data = self._request(
+            'PUT', path, data=raw, timeout=self._SYNC_TIMEOUT)
+        item = _normalize_item(data) if isinstance(data, dict) else None
+        if item is None:
+            raise VaultError("Bitwarden serve returned an invalid item")
+        return item
+
     def sync(self) -> None:
         self._request('POST', '/sync', timeout=self._SYNC_TIMEOUT)
 
@@ -385,6 +579,8 @@ class BitwardenComponent:
         self._unlock_prompt_active = False
         self._unlock_callbacks: list[Callable[[bool, str | None], None]] = []
         self._unlock_suppressed_until = 0.0
+        self._save_prompt_active = False
+        self._save_seen: set[tuple[str, str, str, str]] = set()
 
     @staticmethod
     def _make_vault() -> Any:
@@ -459,11 +655,14 @@ class BitwardenComponent:
             return
         if not isinstance(fields, dict):
             return
+        if _form_blocks_autofill(fields):
+            return
         if not (fields.get('username') or fields.get('password')):
             return
         url = fields.get('url') or tab.url().toString()
+        form_id = fields.get('form_id')
         self._lookup(url, lambda items, error: self._auto_fill_items(
-            tab, url, items, error, frame=None))
+            tab, url, items, error, frame=None, form_id=form_id))
 
     # Messaging
 
@@ -475,29 +674,39 @@ class BitwardenComponent:
             return
         message_type = message_obj.type
 
+        form = payload.get('form')
+        form_id = payload.get('form_id')
+
         if message_type == 'fieldFocus':
+            if _form_blocks_autofill(form):
+                return
             url = payload.get('url') or message_obj.frame.url.toString()
             self._lookup(url, lambda items, error: self._send_candidates(
-                message_obj, items, error))
+                message_obj, items, error, form_id=form_id))
         elif message_type == 'fill':
             item_id = payload.get('item_id')
             if isinstance(item_id, str):
                 self._send_credentials(
-                    message_obj, item_id, auto=False)
+                    message_obj, item_id, auto=False, form_id=form_id)
         elif message_type == 'autoFillRequest':
-            if not self._autofill_on_load:
+            if not self._autofill_on_load or _form_blocks_autofill(form):
                 return
             url = payload.get('url') or message_obj.frame.url.toString()
             self._lookup(url, lambda items, error: self._auto_fill_items(
-                message_obj.tab, url, items, error, frame=message_obj.frame))
+                message_obj.tab, url, items, error,
+                frame=message_obj.frame, form_id=form_id))
         elif message_type == 'filled':
             log.extensions.debug(
-                "Bitwarden fill reported: auto=%s",
-                bool(payload.get('auto')))
+                "Bitwarden fill reported: auto=%s generated=%s",
+                bool(payload.get('auto')), bool(payload.get('generated')))
+        elif message_type == 'generatePassword':
+            self._handle_generate(message_obj, payload)
+        elif message_type == 'saveCandidate':
+            self._handle_save_candidate(message_obj, payload)
 
     def _send_candidates(self, message_obj: messaging.Message,
                          items: list[VaultItem] | None,
-                         error: str | None) -> None:
+                         error: str | None, *, form_id: Any = None) -> None:
         if error:
             log.extensions.warning("Bitwarden lookup failed: %s", error)
             return
@@ -506,18 +715,20 @@ class BitwardenComponent:
             for item in items or []
         ]
         self._send(message_obj.tab,
-                   {'type': 'candidates', 'items': summaries},
+                   {'type': 'candidates', 'items': summaries,
+                    'form_id': form_id},
                    message_obj.frame)
 
     def _send_credentials(self, message_obj: messaging.Message,
-                          item_id: str, *, auto: bool) -> None:
+                          item_id: str, *, auto: bool,
+                          form_id: Any = None) -> None:
         self._run(
             lambda: self._vault.get_item(item_id),
             functools.partial(
-                self._on_item, message_obj, auto=auto))
+                self._on_item, message_obj, auto=auto, form_id=form_id))
 
     def _on_item(self, message_obj: messaging.Message, item: Any,
-                 error: str | None, *, auto: bool) -> None:
+                 error: str | None, *, auto: bool, form_id: Any = None) -> None:
         if error or item is None:
             log.extensions.warning("Bitwarden item lookup failed: %s", error)
             return
@@ -526,21 +737,26 @@ class BitwardenComponent:
             self._run(
                 lambda: self._vault.get_totp(item.id),
                 functools.partial(
-                    self._on_credentials_ready, message_obj, item, auto=auto))
+                    self._on_credentials_ready, message_obj, item,
+                    auto=auto, form_id=form_id))
             return
-        self._deliver_credentials(message_obj, item, totp, auto=auto)
+        self._deliver_credentials(
+            message_obj, item, totp, auto=auto, form_id=form_id)
 
     def _on_credentials_ready(self, message_obj: messaging.Message,
                               item: Any, totp: Any,
-                              error: str | None, *, auto: bool) -> None:
-        self._deliver_credentials(message_obj, item, totp, auto=auto)
+                              error: str | None, *, auto: bool,
+                              form_id: Any = None) -> None:
+        self._deliver_credentials(
+            message_obj, item, totp, auto=auto, form_id=form_id)
 
     def _deliver_credentials(self, message_obj: messaging.Message,
                              item: VaultItem, totp: str | None,
-                             *, auto: bool) -> None:
+                             *, auto: bool, form_id: Any = None) -> None:
         self._send(message_obj.tab, {
             'type': 'credentials',
             'auto': auto,
+            'form_id': form_id,
             'username': item.username,
             'password': item.password,
             'totp': totp,
@@ -549,7 +765,7 @@ class BitwardenComponent:
     def _auto_fill_items(self, tab: apitypes.ExtensionTab, url: str,
                          items: list[VaultItem] | None,
                          error: str | None, *,
-                         frame: Any) -> None:
+                         frame: Any, form_id: Any = None) -> None:
         log.extensions.debug("Bitwarden auto candidates=%d error=%s",
                              len(items or []), error)
         if error or not items or len(items) != 1:
@@ -557,34 +773,186 @@ class BitwardenComponent:
         self._run(
             lambda: self._vault.get_item(items[0].id),
             functools.partial(
-                self._on_auto_item, tab, frame))
+                self._on_auto_item, tab, frame, form_id))
 
     def _on_auto_item(self, tab: apitypes.ExtensionTab, frame: Any,
-                      item: Any, error: str | None) -> None:
+                      form_id: Any, item: Any,
+                      error: str | None) -> None:
         if error or item is None:
             return
         if item.totp:
             self._run(
                 lambda: self._vault.get_totp(item.id),
                 functools.partial(
-                    self._on_auto_totp, tab, frame, item))
+                    self._on_auto_totp, tab, frame, form_id, item))
         else:
-            self._send_auto(tab, frame, item, None)
+            self._send_auto(tab, frame, form_id, item, None)
 
     def _on_auto_totp(self, tab: apitypes.ExtensionTab, frame: Any,
-                      item: VaultItem, totp: Any,
+                      form_id: Any, item: VaultItem, totp: Any,
                       error: str | None) -> None:
-        self._send_auto(tab, frame, item, totp)
+        self._send_auto(tab, frame, form_id, item, totp)
 
     def _send_auto(self, tab: apitypes.ExtensionTab, frame: Any,
-                   item: VaultItem, totp: str | None) -> None:
+                   form_id: Any, item: VaultItem, totp: str | None) -> None:
         self._send(tab, {
             'type': 'credentials',
             'auto': True,
+            'form_id': form_id,
             'username': item.username,
             'password': item.password,
             'totp': totp,
         }, frame)
+
+    # Password generation
+
+    def _handle_generate(self, message_obj: messaging.Message,
+                         payload: dict[str, Any]) -> None:
+        if not message_obj.is_main or message_obj.tab.is_private:
+            return
+        request_id = payload.get('request_id')
+        form_id = payload.get('form_id')
+        options = payload.get('options')
+        if not isinstance(options, dict):
+            self._send(message_obj.tab, {
+                'type': 'generateError',
+                'request_id': request_id,
+                'form_id': form_id,
+                'error': 'Invalid generator options',
+            }, message_obj.frame)
+            return
+        self._run(
+            lambda: generate_password(options),
+            functools.partial(
+                self._on_generated, message_obj, request_id, form_id))
+
+    def _on_generated(self, message_obj: messaging.Message,
+                      request_id: Any, form_id: Any,
+                      result: Any, error: str | None) -> None:
+        if error:
+            self._send(message_obj.tab, {
+                'type': 'generateError',
+                'request_id': request_id,
+                'form_id': form_id,
+                'error': error,
+            }, message_obj.frame)
+            return
+        self._send(message_obj.tab, {
+            'type': 'generatedPassword',
+            'request_id': request_id,
+            'form_id': form_id,
+            'password': result,
+        }, message_obj.frame)
+
+    # Save/update
+
+    def _handle_save_candidate(self, message_obj: messaging.Message,
+                               payload: dict[str, Any]) -> None:
+        if not message_obj.is_main or message_obj.tab.is_private:
+            return
+        url = payload.get('url')
+        username = payload.get('username')
+        password = payload.get('password')
+        registration = bool(payload.get('registration'))
+        registration_strong = bool(payload.get('registration_strong'))
+        password_change = bool(payload.get('password_change'))
+        form_id = payload.get('form_id')
+        if not isinstance(url, str) or not url.startswith(('http://', 'https://')):
+            return
+        if not isinstance(password, str) or not password:
+            return
+        if not isinstance(username, str):
+            username = ''
+        if registration and not registration_strong:
+            log.extensions.debug(
+                "Bitwarden save skipped: weak registration evidence")
+            return
+        key = (url, username, password, str(form_id))
+        if key in self._save_seen:
+            return
+        if self._save_prompt_active:
+            log.extensions.debug("Bitwarden save skipped: prompt active")
+            return
+        self._save_seen.add(key)
+        self._save_prompt_active = True
+        log.extensions.debug("Bitwarden save candidate for %s", url)
+        self._lookup(
+            url,
+            lambda items, error: self._on_save_lookup(
+                items, error, url, username, password,
+                registration=registration, password_change=password_change))
+
+    def _on_save_lookup(self, items: list[VaultItem] | None,
+                        error: str | None, url: str, username: str,
+                        password: str, *, registration: bool,
+                        password_change: bool) -> None:
+        if error:
+            log.extensions.warning("Bitwarden save lookup failed: %s", error)
+            self._save_prompt_active = False
+            return
+        matches = [
+            item for item in items or []
+            if item.username.casefold() == username.casefold()
+        ]
+        if len(matches) > 1:
+            log.extensions.debug(
+                "Bitwarden save skipped: multiple username matches")
+            self._save_prompt_active = False
+            return
+        if matches:
+            item = matches[0]
+            if item.password == password:
+                self._save_prompt_active = False
+                return
+            if registration and not password_change:
+                log.extensions.debug(
+                    "Bitwarden registration save skipped: "
+                    "existing username with different password")
+                self._save_prompt_active = False
+                return
+            self._prompt_save(item, url, username, password)
+            return
+        self._prompt_save(None, url, username, password)
+
+    def _prompt_save(self, item: VaultItem | None, url: str,
+                     username: str, password: str) -> None:
+        host = urlparse(url).hostname or url
+        if item is None:
+            title = "Save login for {}?".format(host)
+        else:
+            title = "Update password for {} on {}?".format(
+                item.username or username, host)
+
+        def answered(answer: bool) -> None:
+            if not answer:
+                self._save_prompt_active = False
+                return
+            if item is None:
+                self._run(
+                    lambda: self._vault.create_login(
+                        url, username, password),
+                    self._on_save_written)
+            else:
+                self._run(
+                    lambda: self._vault.update_login(
+                        item.id, username=username, password=password,
+                        url=url),
+                    self._on_save_written)
+
+        def cancelled() -> None:
+            self._save_prompt_active = False
+            log.extensions.debug("Bitwarden save cancelled")
+
+        qmessage.ask_async(
+            title, usertypes.PromptMode.yesno, answered,
+            cancelled=cancelled)
+
+    def _on_save_written(self, _result: Any, error: str | None) -> None:
+        self._save_prompt_active = False
+        if error:
+            message.error("Bitwarden save failed: {}".format(error))
+        else:
+            message.info("Bitwarden login saved")
 
     def _send(self, tab: apitypes.ExtensionTab, payload: dict[str, Any],
               frame: Any) -> None:

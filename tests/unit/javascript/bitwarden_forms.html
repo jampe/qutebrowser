@@ -1,0 +1,48 @@
+<!doctype html>
+<html><body>
+<form id="login-form" action="/login">
+  <input id="login-user" name="username" autocomplete="username">
+  <input id="login-password" name="password" type="password"
+         autocomplete="current-password">
+</form>
+
+<form id="register-form" action="/register">
+  <input id="register-email" name="email" autocomplete="email">
+  <input id="register-new" name="new-password" type="password"
+         autocomplete="new-password">
+  <input id="register-confirm" name="confirm-password" type="password"
+         autocomplete="new-password">
+</form>
+
+<form id="change-form" action="/change">
+  <input id="change-email" name="email" autocomplete="username" disabled>
+  <input id="change-current" name="current-password" type="password"
+         autocomplete="current-password">
+  <input id="change-new" name="new-password" type="password"
+         autocomplete="new-password">
+  <input id="change-confirm" name="confirm-password" type="password"
+         autocomplete="new-password">
+</form>
+
+<form id="unmarked-form" action="/unmarked">
+  <input id="unmarked-first" name="password" type="password">
+  <input id="unmarked-second" name="password2" type="password">
+</form>
+
+<form id="explicit-new-form" action="/explicit">
+  <input id="explicit-new" name="new-password" type="password"
+         autocomplete="new-password">
+  <input id="explicit-second" name="password2" type="password">
+</form>
+
+<form id="confirm-sibling-form" action="/confirm-sibling">
+  <input id="sibling-first" name="password" type="password">
+  <input id="sibling-confirm" name="confirm-password" type="password">
+</form>
+
+<form id="text-only-form" action="/signup">
+  <input id="text-only-password" name="password" type="password">
+</form>
+
+<input id="outside-otp" name="otp" autocomplete="one-time-code">
+</body></html>

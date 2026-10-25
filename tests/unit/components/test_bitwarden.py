@@ -105,6 +105,7 @@ def test_fill_sends_credentials_to_frame(component, tab, frame):
     assert payload == {
         'type': 'credentials',
         'auto': False,
+        'form_id': None,
         'username': 'alice',
         'password': 'secret',
         'totp': '123456',
@@ -366,3 +367,292 @@ def test_filled_event_is_accepted(component, tab, frame):
         tab, frame, 'filled', {'auto': True})
     component.on_message(message)
     assert tab.sent == []
+
+
+def test_generate_password_password_mode(monkeypatch):
+    calls = []
+
+    class Result:
+        returncode = 0
+        stdout = 'generated-value\n'
+        stderr = ''
+
+    def run(args, **kwargs):
+        calls.append(args)
+        return Result()
+
+    monkeypatch.setattr(bitwarden.shutil, 'which', lambda _name: '/bin/bw')
+    monkeypatch.setattr(bitwarden.subprocess, 'run', run)
+    result = bitwarden.generate_password({
+        'mode': 'password',
+        'length': 20,
+        'uppercase': True,
+        'lowercase': True,
+        'number': False,
+        'special': True,
+        'minNumber': 0,
+        'minSpecial': 2,
+        'ambiguous': True,
+    })
+    assert result == 'generated-value'
+    assert calls == [[
+        '/bin/bw', 'generate', '-u', '-l', '-s', '--length', '20',
+        '--minSpecial', '2', '--ambiguous',
+    ]]
+
+
+def test_generate_password_passphrase_mode(monkeypatch):
+    calls = []
+
+    class Result:
+        returncode = 0
+        stdout = 'correct-horse\n'
+        stderr = ''
+
+    def run(args, **kwargs):
+        calls.append(args)
+        return Result()
+
+    monkeypatch.setattr(bitwarden.shutil, 'which', lambda _name: '/bin/bw')
+    monkeypatch.setattr(bitwarden.subprocess, 'run', run)
+    result = bitwarden.generate_password({
+        'mode': 'passphrase',
+        'words': 4,
+        'separator': 'space',
+        'capitalize': True,
+        'includeNumber': True,
+    })
+    assert result == 'correct-horse'
+    assert calls == [[
+        '/bin/bw', 'generate', '-p', '--words', '4',
+        '--separator=space', '-c', '--includeNumber',
+    ]]
+
+
+def test_generate_password_rejects_empty_character_sets(monkeypatch):
+    monkeypatch.setattr(bitwarden.shutil, 'which', lambda _name: '/bin/bw')
+    with pytest.raises(bitwarden.VaultError, match='character set'):
+        bitwarden.generate_password({
+            'mode': 'password',
+            'length': 14,
+            'uppercase': False,
+            'lowercase': False,
+            'number': False,
+            'special': False,
+        })
+
+
+def test_bwserve_create_and_update_login(monkeypatch):
+    vault = bitwarden.BwServeVault()
+    raw = {
+        'id': '1',
+        'name': 'Example',
+        'notes': 'keep me',
+        'fields': [{'name': 'custom', 'value': 'value'}],
+        'login': {
+            'username': 'alice',
+            'password': 'old',
+            'uris': [{'uri': 'https://old.example/'}],
+        },
+    }
+    calls = []
+
+    def request(method, path, **kwargs):
+        calls.append((method, path, kwargs.get('data')))
+        if method == 'GET':
+            return raw
+        if method == 'POST':
+            return {
+                'id': '2', 'name': 'example.com',
+                'login': kwargs['data']['login'],
+            }
+        if method == 'PUT':
+            return kwargs['data']
+        raise AssertionError(method)
+
+    monkeypatch.setattr(vault, '_request', request)
+    created = vault.create_login(
+        'https://example.com/login', 'alice', 'new-secret')
+    assert created.username == 'alice'
+    assert created.uris == ['https://example.com/']
+    post = calls[0]
+    assert post[0] == 'POST'
+    assert post[1] == '/object/item'
+    assert post[2]['login']['uris'] == [{'uri': 'https://example.com/'}]
+
+    updated = vault.update_login(
+        '1', username='alice', password='new-secret',
+        url='https://example.com/login')
+    assert updated.password == 'new-secret'
+    get_call, put_call = calls[1], calls[2]
+    assert get_call[:2] == ('GET', '/object/item/1')
+    assert put_call[:2] == ('PUT', '/object/item/1')
+    body = put_call[2]
+    assert body['notes'] == 'keep me'
+    assert body['fields'] == [{'name': 'custom', 'value': 'value'}]
+    assert body['login']['password'] == 'new-secret'
+    assert {'uri': 'https://example.com/'} in body['login']['uris']
+    vault.close()
+
+
+def test_normalize_item_reads_nested_login_uris():
+    item = bitwarden._normalize_item({  # noqa: SLF001
+        'id': '1', 'name': 'Example',
+        'uris': [{'uri': 'https://old.example/'}],
+        'login': {
+            'username': 'alice', 'password': 'secret',
+            'uris': [{'uri': 'https://example.com/'}],
+        },
+    })
+    assert item is not None
+    assert item.uris == ['https://example.com/']
+
+
+def test_fake_vault_create_update():
+    vault = bitwarden.FakeVault([])
+    item = vault.create_login('https://example.com/login', 'alice', 'secret')
+    assert vault.list_items('https://example.com/') == [item]
+    updated = vault.update_login(
+        item.id, username='alice', password='new', url='https://example.com/')
+    assert updated.password == 'new'
+    assert updated.name == item.name
+    assert updated.uris == item.uris
+
+
+def _save_message(tab, frame, **overrides):
+    payload = {
+        'url': 'https://example.com/login',
+        'username': 'alice',
+        'password': 'secret',
+        'registration': False,
+        'registration_strong': False,
+        'password_change': False,
+        'form_id': 'form-1',
+        'form_action': '/login',
+    }
+    payload.update(overrides)
+    return make_message(tab, frame, 'saveCandidate', payload)
+
+
+def test_save_prompt_creates_login(component, tab, frame, monkeypatch):
+    component._vault = bitwarden.FakeVault([])
+    prompts = []
+    monkeypatch.setattr(
+        bitwarden.qmessage, 'ask_async',
+        lambda title, mode, callback, **kwargs: prompts.append(
+            (title, callback, kwargs)))
+    monkeypatch.setattr(bitwarden.message, 'info', lambda _msg: None)
+    message = _save_message(tab, frame)
+    component.on_message(message)
+    assert len(prompts) == 1
+    assert 'Save login' in prompts[0][0]
+    prompts[0][1](True)
+    assert component._vault.list_items('https://example.com/')[0].password == 'secret'
+    assert not component._save_prompt_active
+
+
+def test_save_prompt_updates_existing(component, tab, frame, monkeypatch):
+    component._vault = bitwarden.FakeVault([ITEMS[0]])
+    prompts = []
+    monkeypatch.setattr(
+        bitwarden.qmessage, 'ask_async',
+        lambda title, mode, callback, **kwargs: prompts.append(
+            (title, callback, kwargs)))
+    monkeypatch.setattr(bitwarden.message, 'info', lambda _msg: None)
+    message = _save_message(
+        tab, frame, password='new-secret', form_id='form-2')
+    component.on_message(message)
+    assert 'Update password' in prompts[0][0]
+    prompts[0][1](True)
+    assert component._vault.get_item('1').password == 'new-secret'
+
+
+def test_save_same_password_does_not_prompt(component, tab, frame,
+                                            monkeypatch):
+    component._vault = bitwarden.FakeVault([ITEMS[0]])
+    prompts = []
+    monkeypatch.setattr(
+        bitwarden.qmessage, 'ask_async',
+        lambda *args, **kwargs: prompts.append(args))
+    component.on_message(_save_message(
+        tab, frame, password='secret', form_id='form-3'))
+    assert prompts == []
+    assert not component._save_prompt_active
+
+
+def test_save_registration_existing_username_skips_update(
+        component, tab, frame, monkeypatch):
+    component._vault = bitwarden.FakeVault([ITEMS[0]])
+    prompts = []
+    monkeypatch.setattr(
+        bitwarden.qmessage, 'ask_async',
+        lambda *args, **kwargs: prompts.append(args))
+    component.on_message(_save_message(
+        tab, frame, password='different', registration=True,
+        registration_strong=True, form_id='form-4'))
+    assert prompts == []
+    assert component._vault.get_item('1').password == 'secret'
+
+
+def test_save_weak_registration_skips(component, tab, frame, monkeypatch):
+    prompts = []
+    monkeypatch.setattr(
+        bitwarden.qmessage, 'ask_async',
+        lambda *args, **kwargs: prompts.append(args))
+    component.on_message(_save_message(
+        tab, frame, registration=True, registration_strong=False,
+        form_id='form-5'))
+    assert prompts == []
+    assert not component._save_prompt_active
+
+
+def test_save_multiple_username_matches_skip(component, tab, frame,
+                                             monkeypatch):
+    duplicate = bitwarden.VaultItem(
+        id='2', name='Other', username='alice', password='other',
+        uris=['https://example.com/'])
+    component._vault = bitwarden.FakeVault([ITEMS[0], duplicate])
+    prompts = []
+    monkeypatch.setattr(
+        bitwarden.qmessage, 'ask_async',
+        lambda *args, **kwargs: prompts.append(args))
+    component.on_message(_save_message(
+        tab, frame, password='different', form_id='form-6'))
+    assert prompts == []
+    assert not component._save_prompt_active
+
+
+def test_generate_message_returns_password(component, tab, frame, monkeypatch):
+    monkeypatch.setattr(bitwarden, 'generate_password',
+                        lambda options: 'generated')
+    message = make_message(
+        tab, frame, 'generatePassword',
+        {'request_id': 7, 'form_id': 'form-1',
+         'options': {'mode': 'password'}})
+    component.on_message(message)
+    envelope, target = tab.sent[0]
+    assert target is frame
+    assert envelope['payload'] == {
+        'type': 'generatedPassword',
+        'request_id': 7,
+        'form_id': 'form-1',
+        'password': 'generated',
+    }
+
+
+def test_save_password_change_updates_existing(component, tab, frame,
+                                               monkeypatch):
+    component._vault = bitwarden.FakeVault([ITEMS[0]])
+    prompts = []
+    monkeypatch.setattr(
+        bitwarden.qmessage, 'ask_async',
+        lambda title, mode, callback, **kwargs: prompts.append(
+            (title, callback, kwargs)))
+    monkeypatch.setattr(bitwarden.message, 'info', lambda _msg: None)
+    message = _save_message(
+        tab, frame, password='changed', registration=True,
+        registration_strong=True, password_change=True, form_id='form-7')
+    component.on_message(message)
+    assert 'Update password' in prompts[0][0]
+    prompts[0][1](True)
+    assert component._vault.get_item('1').password == 'changed'

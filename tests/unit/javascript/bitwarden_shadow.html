@@ -1,0 +1,13 @@
+<!doctype html>
+<html><body>
+<div id="shadow-host"></div>
+<script>
+const root = document.getElementById('shadow-host').attachShadow({mode: 'open'});
+root.innerHTML = `
+<form id="shadow-login" action="/shadow-login" method="post">
+  <input id="shadow-user" name="username" autocomplete="username">
+  <input id="shadow-password" name="password" type="password"
+         autocomplete="current-password">
+</form>`;
+</script>
+</body></html>
