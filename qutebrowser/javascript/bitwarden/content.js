@@ -47,6 +47,7 @@
         filledForms: Object.create(null),
         route: window.location.href,
         requestId: 0,
+        pendingSave: null,
         lastSaveHash: null,
         lastSaveAt: 0
     };
@@ -1106,7 +1107,7 @@
         return null;
     }
 
-    function saveCandidate(form) {
+    function saveCandidate(form, urlOverride) {
         if (!form || !form.isConnected) {
             return;
         }
@@ -1152,7 +1153,7 @@
                 }
             }
         }
-        var url = window.location.href;
+        var url = urlOverride || window.location.href;
         if (!/^https?:\/\//.test(url)) {
             return;
         }
@@ -1178,6 +1179,83 @@
         });
     }
 
+    function cancelPendingSave() {
+        if (state.pendingSave) {
+            window.clearTimeout(state.pendingSave.timer);
+            state.pendingSave = null;
+        }
+    }
+
+    function flushPendingSave() {
+        if (!state.pendingSave) {
+            return;
+        }
+        var pending = state.pendingSave;
+        window.clearTimeout(pending.timer);
+        state.pendingSave = null;
+        saveCandidate(pending.form, pending.url);
+    }
+
+    function queuePendingSave(form) {
+        if (!form || !form.isConnected || !form.checkValidity()) {
+            return;
+        }
+        cancelPendingSave();
+        var url = window.location.href;
+        state.pendingSave = {
+            form: form,
+            url: url,
+            timer: window.setTimeout(flushPendingSave, 700)
+        };
+    }
+
+    function isSubmitControl(element) {
+        if (!element || !element.tagName) {
+            return false;
+        }
+        var tag = element.tagName.toLowerCase();
+        var type = attr(element, "type");
+        if (tag === "button") {
+            return type === "" || type === "submit";
+        }
+        return tag === "input" && type === "submit";
+    }
+
+    function onClick(event) {
+        if (!event.isTrusted || window.top !== window) {
+            return;
+        }
+        var path = event.composedPath ? event.composedPath() : [];
+        var control = path.find(isSubmitControl);
+        if (!control) {
+            return;
+        }
+        var form = control.form || resolveSubmitForm(event);
+        if (form) {
+            queuePendingSave(form);
+        }
+    }
+
+    function onKeydown(event) {
+        if (!event.isTrusted || event.key !== "Enter" ||
+                event.ctrlKey || event.altKey || event.metaKey) {
+            return;
+        }
+        var target = event.target;
+        var kind = classifyField(target, false);
+        if (kind !== "username" && kind !== "password") {
+            return;
+        }
+        var form = resolveSubmitForm(event);
+        if (form) {
+            queuePendingSave(form);
+        }
+    }
+
+    function onPageHide() {
+        flushPendingSave();
+    }
+
     function onSubmit(event) {
         if (window.top !== window) {
             return;
@@ -1186,6 +1264,7 @@
         if (!form) {
             return;
         }
+        cancelPendingSave();
         queueMicrotask(function () {
             if (event.defaultPrevented) {
                 return;
@@ -1305,7 +1384,10 @@
                 }
             }, 150);
         }, true);
+        document.addEventListener("click", onClick, true);
+        document.addEventListener("keydown", onKeydown, true);
         document.addEventListener("submit", onSubmit, false);
+        window.addEventListener("pagehide", onPageHide);
         window.addEventListener("resize", function () {
             requestButtonPosition();
         });
@@ -1345,6 +1427,7 @@
         if (window.location.href === state.route) {
             return;
         }
+        flushPendingSave();
         state.route = window.location.href;
         state.filledForms = Object.create(null);
         scanGeneratorButtons();
