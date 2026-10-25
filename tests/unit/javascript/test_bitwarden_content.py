@@ -300,3 +300,51 @@ def test_change_submit_marks_password_change(qtbot, js_tester_webengine):
     assert payload['registration'] is True
     assert payload['registration_strong'] is True
     assert payload['password_change'] is True
+
+
+def test_lookup_error_renders_search_menu(qtbot, js_tester_webengine):
+    _setup(js_tester_webengine, 'bitwarden_login.html')
+    fields = _json(js_tester_webengine,
+                   "JSON.stringify(window.__bwCollectFields())")
+    _js(js_tester_webengine,
+        "document.getElementById('login-user').dispatchEvent("
+        "new FocusEvent('focusin', {bubbles: true}))",
+        world=usertypes.JsWorld.main)
+    qtbot.wait(30)
+    _js(js_tester_webengine, """
+        window.__qbHandler({
+            type: 'candidates', items: [], error: 'Vault is locked.',
+            document_id: window.__quteBitwarden.documentId,
+            form_id: %r
+        });
+    """ % fields['form_id'])
+    count = _js(js_tester_webengine,
+                "document.querySelectorAll("
+                "'[data-qute-bitwarden-menu]').length",
+                world=usertypes.JsWorld.main)
+    state = _json(js_tester_webengine, """JSON.stringify({
+        error: window.__quteBitwarden.menuError,
+        form: window.__quteBitwarden.menuFormId,
+        active: !!window.__quteBitwarden.activeField,
+        activeForm: window.__quteBitwarden.activeFormId,
+        host: !!window.__quteBitwarden.menuHost
+    })""")
+    assert count == 1, state
+    assert state['error'] == 'Vault is locked.'
+    assert state['form'] == fields['form_id']
+
+
+def test_search_reply_does_not_open_closed_menu(qtbot, js_tester_webengine):
+    _setup(js_tester_webengine, 'bitwarden_login.html')
+    _js(js_tester_webengine, """
+        window.__qbHandler({
+            type: 'searchResults', items: [{id: '1', name: 'x'}],
+            request_id: 1, document_id: window.__quteBitwarden.documentId,
+            form_id: 'form-1'
+        });
+    """)
+    count = _js(js_tester_webengine,
+                "document.querySelectorAll("
+                "'[data-qute-bitwarden-menu]').length",
+                world=usertypes.JsWorld.main)
+    assert count == 0

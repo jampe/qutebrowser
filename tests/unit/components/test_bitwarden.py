@@ -69,10 +69,10 @@ def frame() -> FakeFrame:
     return FakeFrame('https://example.com/login')
 
 
-def make_message(tab, frame, type_, payload):
+def make_message(tab, frame, type_, payload, *, is_main=True):
     return messaging.Message(
         tab=tab, frame=frame, origin='https://example.com',
-        relayed=False, is_main=True, channel='bitwarden',
+        relayed=False, is_main=is_main, channel='bitwarden',
         type=type_, request_id='1', payload=payload)
 
 
@@ -656,3 +656,175 @@ def test_save_password_change_updates_existing(component, tab, frame,
     assert 'Update password' in prompts[0][0]
     prompts[0][1](True)
     assert component._vault.get_item('1').password == 'changed'
+
+
+def test_fake_vault_search_and_uri_only_update():
+    vault = bitwarden.FakeVault([ITEMS[0]])
+    assert vault.search_items('example') == [ITEMS[0]]
+    assert vault.search_items('alice') == [ITEMS[0]]
+    assert vault.search_items('missing') == []
+    assert vault.search_items('  ') == []
+    updated = vault.update_login(
+        '1', url='https://other.example/login', add_uri=True)
+    assert updated.password == 'secret'
+    assert updated.username == 'alice'
+    assert 'https://other.example/' in updated.uris
+
+
+def test_bwserve_search_items(monkeypatch):
+    vault = bitwarden.BwServeVault()
+    raw = {
+        'id': '1', 'name': 'Example',
+        'login': {
+            'username': 'alice', 'password': 'secret',
+            'uris': [{'uri': 'https://example.com/'}],
+        },
+    }
+    calls = []
+
+    def request(method, path, **kwargs):
+        calls.append((method, path))
+        return {'object': 'list', 'data': [raw]}
+
+    monkeypatch.setattr(vault, '_request', request)
+    items = vault.search_items('example login')
+    assert [item.id for item in items] == ['1']
+    assert calls == [(
+        'GET',
+        '/list/object/items?search=example+login',
+    )]
+    assert vault.search_items('   ') == []
+    vault.close()
+
+
+def test_candidates_error_still_opens_menu(component, tab, frame,
+                                           monkeypatch):
+    monkeypatch.setattr(bitwarden.log.extensions, 'warning', lambda *a: None)
+    component._send_candidates(
+        make_message(tab, frame, 'fieldFocus', {}), [],
+        'Vault is locked.',
+        form_id='form-1', document_id='doc-1')
+    envelope, target = tab.sent[-1]
+    assert target is frame
+    assert envelope['payload'] == {
+        'type': 'candidates',
+        'items': [],
+        'form_id': 'form-1',
+        'document_id': 'doc-1',
+        'error': 'Vault is locked.',
+    }
+
+
+def test_search_is_main_frame_only(component, tab, frame):
+    component._vault = bitwarden.FakeVault([ITEMS[0]])
+    payload = {
+        'request_id': 3, 'document_id': 'doc-1',
+        'form_id': 'form-1', 'query': 'alice',
+    }
+    component.on_message(make_message(
+        tab, frame, 'searchItems', payload, is_main=False))
+    assert tab.sent == []
+
+    component.on_message(make_message(
+        tab, frame, 'searchItems', payload))
+    envelope, target = tab.sent[-1]
+    assert target is frame
+    assert envelope['type'] == 'searchResults'
+    assert envelope['payload']['request_id'] == 3
+    assert envelope['payload']['items'][0]['username'] == 'alice'
+    assert 'password' not in envelope['payload']['items'][0]
+
+
+def test_selected_fill_and_add_uri(component, tab, frame, monkeypatch):
+    component._vault = bitwarden.FakeVault([ITEMS[0]])
+    prompts = []
+    monkeypatch.setattr(
+        bitwarden.qmessage, 'ask_async',
+        lambda title, mode, callback, **kwargs: prompts.append(
+            (title, callback, kwargs)))
+    monkeypatch.setattr(bitwarden.message, 'info', lambda _msg: None)
+
+    fill = make_message(tab, frame, 'fill', {
+        'item_id': '1',
+        'document_id': 'doc-1',
+        'form_id': 'form-1',
+        'source': 'search',
+        'url': 'https://other.example/login',
+    })
+    component.on_message(fill)
+    assert len(component._selected) == 1
+
+    save = _save_message(
+        tab, frame, url='https://other.example/login',
+        password='secret', document_id='doc-1', form_id='form-1')
+    component.on_message(save)
+    assert len(prompts) == 1
+    assert prompts[0][0].startswith('Add other.example')
+    prompts[0][1](True)
+    item = component._vault.get_item('1')
+    assert 'https://other.example/' in item.uris
+    assert item.password == 'secret'
+
+
+def test_route_changed_clears_selection(component, tab, frame):
+    component._vault = bitwarden.FakeVault([ITEMS[0]])
+    component.on_message(make_message(tab, frame, 'fill', {
+        'item_id': '1', 'document_id': 'doc-1', 'form_id': 'form-1',
+        'source': 'search', 'url': 'https://other.example/login',
+    }))
+    assert component._selected
+    component.on_message(make_message(tab, frame, 'routeChanged', {
+        'document_id': 'doc-1', 'url': 'https://other.example/next',
+    }))
+    assert component._selected == {}
+
+
+def test_bwserve_add_uri_only_preserves_credentials(monkeypatch):
+    vault = bitwarden.BwServeVault()
+    raw = {
+        'id': '1', 'name': 'Example',
+        'login': {
+            'username': 'alice', 'password': 'secret',
+            'uris': [{'uri': 'https://old.example/'}],
+        },
+    }
+    calls = []
+
+    def request(method, path, **kwargs):
+        calls.append((method, path, kwargs.get('data')))
+        if method == 'GET':
+            return raw
+        return kwargs['data']
+
+    monkeypatch.setattr(vault, '_request', request)
+    item = vault.update_login(
+        '1', url='https://new.example/login', add_uri=True)
+    assert item.username == 'alice'
+    assert item.password == 'secret'
+    assert 'https://new.example/' in item.uris
+    assert calls[1][2]['login']['username'] == 'alice'
+    assert calls[1][2]['login']['password'] == 'secret'
+    vault.close()
+
+
+def test_selected_fill_password_change_updates_and_adds_uri(
+        component, tab, frame, monkeypatch):
+    component._vault = bitwarden.FakeVault([ITEMS[0]])
+    prompts = []
+    monkeypatch.setattr(
+        bitwarden.qmessage, 'ask_async',
+        lambda title, mode, callback, **kwargs: prompts.append(
+            (title, callback, kwargs)))
+    monkeypatch.setattr(bitwarden.message, 'info', lambda _msg: None)
+    component.on_message(make_message(tab, frame, 'fill', {
+        'item_id': '1', 'document_id': 'doc-1', 'form_id': 'form-1',
+        'source': 'search', 'url': 'https://other.example/login',
+    }))
+    component.on_message(_save_message(
+        tab, frame, url='https://other.example/login',
+        password='changed', document_id='doc-1', form_id='form-1'))
+    assert 'Update password and add' in prompts[0][0]
+    prompts[0][1](True)
+    item = component._vault.get_item('1')
+    assert item.password == 'changed'
+    assert 'https://other.example/' in item.uris

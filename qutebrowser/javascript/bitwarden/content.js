@@ -16,12 +16,25 @@
     var DOCUMENT_FORM_ID = "__document__";
     var BUTTON_SIZE = 22;
     var MENU_WIDTH = 300;
+    var documentId = (window.crypto && window.crypto.randomUUID)
+        ? window.crypto.randomUUID()
+        : "doc-" + Math.random().toString(36).slice(2) + "-" + Date.now();
 
     var state = {
+        documentId: documentId,
         activeField: null,
         activeFormId: null,
         menuHost: null,
         menuShadow: null,
+        menuField: null,
+        menuFormId: null,
+        menuItems: [],
+        menuError: null,
+        searchQuery: "",
+        searchResults: [],
+        searchError: null,
+        searchTimer: null,
+        searchRequestId: 0,
         generatorButtons: Object.create(null),
         generatorMenuHost: null,
         generatorMenuShadow: null,
@@ -529,11 +542,16 @@
 
     var MENU_CSS = [
         ":host { all: initial; }",
-        ".box { box-sizing: border-box; width: 100%; max-height: 260px;",
+        ".box { box-sizing: border-box; width: 100%; max-height: 340px;",
         "  overflow: auto; background: #ffffff; color: #1f2937;",
         "  border: 1px solid #cbd5e1; border-radius: 6px;",
         "  box-shadow: 0 8px 24px rgba(0,0,0,.22);",
         "  font: 13px/1.4 system-ui, sans-serif; }",
+        ".search { box-sizing: border-box; width: calc(100% - 16px);",
+        "  margin: 8px; padding: 5px 7px; border: 1px solid #cbd5e1;",
+        "  border-radius: 5px; font: inherit; }",
+        ".error { color: #b91c1c; padding: 0 8px 6px; }",
+        ".empty { color: #64748b; padding: 8px; }",
         ".item { display: block; width: 100%; padding: 7px 10px;",
         "  border: 0; background: transparent; text-align: left;",
         "  cursor: pointer; }",
@@ -543,16 +561,139 @@
     ].join("\n");
 
     function hideMenu() {
+        if (state.searchTimer) {
+            window.clearTimeout(state.searchTimer);
+            state.searchTimer = null;
+        }
         if (state.menuHost && state.menuHost.parentNode) {
             state.menuHost.parentNode.removeChild(state.menuHost);
         }
         state.menuHost = null;
         state.menuShadow = null;
+        state.menuField = null;
+        state.menuFormId = null;
+        state.menuItems = [];
+        state.menuError = null;
+        state.searchQuery = "";
+        state.searchResults = [];
+        state.searchError = null;
+        state.searchRequestId = 0;
     }
 
-    function showMenu(items, formId) {
-        hideMenu();
-        if (!state.activeField || !items || !items.length) {
+    function menuFill(item, source) {
+        send({
+            type: "fill",
+            payload: {
+                item_id: item.id,
+                document_id: state.documentId,
+                form_id: state.activeFormId,
+                source: source,
+                url: window.location.href
+            }
+        });
+    }
+
+    function menuItemButton(item, source) {
+        var button = document.createElement("button");
+        button.className = "item";
+        button.type = "button";
+        button.setAttribute("data-item-id", item.id);
+        var name = document.createElement("span");
+        name.className = "name";
+        name.textContent = item.name || "(unnamed)";
+        var user = document.createElement("span");
+        user.className = "user";
+        user.textContent = item.username || "";
+        button.appendChild(name);
+        button.appendChild(user);
+        button.addEventListener("click", function (event) {
+            if (!event.isTrusted) {
+                return;
+            }
+            menuFill(item, source);
+        });
+        return button;
+    }
+
+    function renderMenuResults() {
+        if (!state.menuShadow) {
+            return;
+        }
+        var results = state.menuShadow.querySelector("[data-bw-results]");
+        if (!results) {
+            return;
+        }
+        results.textContent = "";
+        var query = state.searchQuery.trim();
+        var items = query ? state.searchResults : state.menuItems;
+        var error = query ? state.searchError : state.menuError;
+        if (error) {
+            var errorNode = document.createElement("div");
+            errorNode.className = "error";
+            errorNode.textContent = error;
+            results.appendChild(errorNode);
+        }
+        if (!items || !items.length) {
+            if (!error) {
+                var empty = document.createElement("div");
+                empty.className = "empty";
+                empty.textContent = query
+                    ? "No matching logins."
+                    : "No saved logins for this site.";
+                results.appendChild(empty);
+            }
+            return;
+        }
+        items.forEach(function (item) {
+            results.appendChild(menuItemButton(
+                item, query ? "search" : "menu"));
+        });
+    }
+
+    function runSearch() {
+        var query = state.searchQuery.trim();
+        if (!query) {
+            state.searchResults = [];
+            state.searchError = null;
+            renderMenuResults();
+            return;
+        }
+        var requestId = ++state.requestId;
+        state.searchRequestId = requestId;
+        if (!send({
+            type: "searchItems",
+            payload: {
+                request_id: requestId,
+                document_id: state.documentId,
+                form_id: state.activeFormId,
+                query: query
+            }
+        })) {
+            state.searchError = "Bitwarden messaging is unavailable.";
+            renderMenuResults();
+        }
+    }
+
+    function scheduleSearch(query) {
+        state.searchQuery = query;
+        state.searchResults = [];
+        state.searchError = null;
+        renderMenuResults();
+        if (state.searchTimer) {
+            window.clearTimeout(state.searchTimer);
+        }
+        if (!query.trim()) {
+            state.searchTimer = null;
+            return;
+        }
+        state.searchTimer = window.setTimeout(function () {
+            state.searchTimer = null;
+            runSearch();
+        }, 250);
+    }
+
+    function showMenu(items, formId, error) {
+        if (!state.activeField) {
             return;
         }
         if (formId && formId !== state.activeFormId) {
@@ -562,6 +703,19 @@
         if (summary.registration) {
             return;
         }
+        if (state.menuHost && state.menuField === state.activeField &&
+                state.menuFormId === (formId || state.activeFormId)) {
+            state.menuItems = items || [];
+            state.menuError = error || null;
+            renderMenuResults();
+            return;
+        }
+        hideMenu();
+        state.menuField = state.activeField;
+        state.menuFormId = formId || state.activeFormId;
+        state.menuItems = items || [];
+        state.menuError = error || null;
+
         var host = document.createElement("div");
         host.setAttribute("data-qute-bitwarden-menu", "");
         host.style.position = "fixed";
@@ -575,48 +729,37 @@
         box.className = "box";
         shadow.appendChild(box);
 
-        items.forEach(function (item) {
-            var button = document.createElement("button");
-            button.className = "item";
-            button.type = "button";
-            button.setAttribute("data-item-id", item.id);
-            var name = document.createElement("span");
-            name.className = "name";
-            name.textContent = item.name || "(unnamed)";
-            var user = document.createElement("span");
-            user.className = "user";
-            user.textContent = item.username || "";
-            button.appendChild(name);
-            button.appendChild(user);
-            button.addEventListener("click", function (event) {
-                if (!event.isTrusted) {
-                    return;
-                }
-                send({
-                    type: "fill",
-                    payload: {
-                        item_id: item.id,
-                        form_id: state.activeFormId
-                    }
-                });
+        var search = null;
+        if (window.top === window) {
+            search = document.createElement("input");
+            search.className = "search";
+            search.type = "search";
+            search.placeholder = "Search Bitwarden";
+            search.value = "";
+            search.addEventListener("input", function () {
+                scheduleSearch(search.value);
             });
-            box.appendChild(button);
-        });
+            box.appendChild(search);
+        }
+        var results = document.createElement("div");
+        results.setAttribute("data-bw-results", "");
+        box.appendChild(results);
 
         var rect = state.activeField.getBoundingClientRect();
-        var width = Math.max(220, Math.min(360, rect.width));
+        var width = Math.max(240, Math.min(360, rect.width));
         host.style.width = width + "px";
         host.style.left = Math.max(4, Math.min(
             rect.left, window.innerWidth - width - 4)) + "px";
         var below = rect.bottom + 4;
-        if (below + 260 > window.innerHeight) {
-            below = Math.max(4, rect.top - 264);
+        if (below + 340 > window.innerHeight) {
+            below = Math.max(4, rect.top - 344);
         }
         host.style.top = below + "px";
 
         document.documentElement.appendChild(host);
         state.menuHost = host;
         state.menuShadow = shadow;
+        renderMenuResults();
 
         host.addEventListener("keydown", function (event) {
             if (!event.isTrusted) {
@@ -629,25 +772,34 @@
                 hideMenu();
                 event.preventDefault();
             } else if (event.key === "ArrowDown") {
-                index = Math.min(buttons.length - 1, index + 1);
-                buttons[index].focus();
+                if (buttons.length) {
+                    index = Math.min(buttons.length - 1, index + 1);
+                    buttons[index].focus();
+                }
                 event.preventDefault();
             } else if (event.key === "ArrowUp") {
-                index = Math.max(0, index - 1);
-                buttons[index].focus();
+                if (buttons.length) {
+                    index = Math.max(0, index - 1);
+                    buttons[index].focus();
+                }
                 event.preventDefault();
-            } else if (event.key === "Enter" && index >= 0) {
-                send({
-                    type: "fill",
-                    payload: {
-                        item_id: buttons[index].getAttribute("data-item-id"),
-                        form_id: state.activeFormId
-                    }
-                });
+            } else if (event.key === "Enter") {
+                if (index >= 0) {
+                    menuFill({
+                        id: buttons[index].getAttribute("data-item-id")
+                    }, state.searchQuery ? "search" : "menu");
+                } else if (search && shadow.activeElement === search &&
+                        buttons.length) {
+                    menuFill({
+                        id: buttons[0].getAttribute("data-item-id")
+                    }, state.searchQuery ? "search" : "menu");
+                }
                 event.preventDefault();
             }
         });
-        host.focus();
+        if (search) {
+            search.focus();
+        }
     }
 
     // Generator button / menu ---------------------------------------------
@@ -1173,6 +1325,7 @@
                 registration: summary.registration,
                 registration_strong: summary.registration_strong,
                 password_change: summary.password_change,
+                document_id: state.documentId,
                 form_id: formId,
                 form_action: summary.action
             }
@@ -1312,6 +1465,7 @@
             payload: {
                 url: window.location.href,
                 kind: kind,
+                document_id: state.documentId,
                 form_id: formId,
                 form: summary
             }
@@ -1324,7 +1478,31 @@
             return;
         }
         if (payload.type === "candidates") {
-            showMenu(payload.items || [], payload.form_id);
+            if (payload.document_id &&
+                    payload.document_id !== state.documentId) {
+                return;
+            }
+            showMenu(payload.items || [], payload.form_id, payload.error);
+        } else if (payload.type === "searchResults") {
+            if (!state.menuHost ||
+                    payload.document_id !== state.documentId ||
+                    payload.form_id !== state.menuFormId ||
+                    payload.request_id !== state.searchRequestId) {
+                return;
+            }
+            state.searchResults = payload.items || [];
+            state.searchError = null;
+            renderMenuResults();
+        } else if (payload.type === "searchError") {
+            if (!state.menuHost ||
+                    payload.document_id !== state.documentId ||
+                    payload.form_id !== state.menuFormId ||
+                    payload.request_id !== state.searchRequestId) {
+                return;
+            }
+            state.searchResults = [];
+            state.searchError = payload.error || "Search failed.";
+            renderMenuResults();
         } else if (payload.type === "credentials") {
             fillCredentials(payload);
         } else if (payload.type === "generatedPassword") {
@@ -1359,6 +1537,7 @@
                     payload: {
                         url: window.location.href,
                         kind: "username",
+                        document_id: state.documentId,
                         form_id: state.activeFormId,
                         form: formSummary(state.activeFormId, false)
                     }
@@ -1428,6 +1607,14 @@
             return;
         }
         flushPendingSave();
+        hideMenu();
+        send({
+            type: "routeChanged",
+            payload: {
+                document_id: state.documentId,
+                url: window.location.href
+            }
+        });
         state.route = window.location.href;
         state.filledForms = Object.create(null);
         scanGeneratorButtons();

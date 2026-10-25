@@ -127,11 +127,36 @@ class FakeVault:
             if not item.uris or any(_hosts_match(uri, url) for uri in item.uris)
         ]
 
+    def search_items(self, query: str) -> list[VaultItem]:
+        needle = query.strip().casefold()
+        if not needle:
+            return []
+        results = []
+        for item in self._items.values():
+            haystack = ' '.join(
+                [item.name, item.username, *item.uris]).casefold()
+            if needle in haystack:
+                results.append(item)
+        return results
+
     def get_item(self, item_id: str) -> VaultItem:
         try:
             return self._items[item_id]
         except KeyError:
             raise VaultError(f"No such item: {item_id}")
+
+    def get_raw_item(self, item_id: str) -> dict[str, Any]:
+        item = self.get_item(item_id)
+        return {
+            'id': item.id,
+            'name': item.name,
+            'login': {
+                'username': item.username,
+                'password': item.password,
+                'totp': item.totp,
+                'uris': [{'uri': uri} for uri in item.uris],
+            },
+        }
 
     def get_totp(self, item_id: str) -> str | None:
         return self.get_item(item_id).totp
@@ -151,15 +176,23 @@ class FakeVault:
         self._items[item_id] = item
         return item
 
-    def update_login(self, item_id: str, *, username: str,
-                     password: str, url: str) -> VaultItem:
+    def update_login(self, item_id: str, *,
+                     username: str | None = None,
+                     password: str | None = None,
+                     url: str | None = None,
+                     add_uri: bool = False) -> VaultItem:
         item = self.get_item(item_id)
         uris = list(item.uris)
-        origin = _origin(url)
-        if not any(_hosts_match(uri, origin) for uri in uris):
-            uris.append(origin)
+        if url is not None:
+            origin = _origin(url)
+            if not any(_hosts_match(uri, origin) for uri in uris):
+                uris.append(origin)
+        elif add_uri:
+            raise VaultError("URL required when adding a URI")
         updated = VaultItem(
-            id=item.id, name=item.name, username=username, password=password,
+            id=item.id, name=item.name,
+            username=item.username if username is None else username,
+            password=item.password if password is None else password,
             totp=item.totp, uris=uris)
         self._items[item.id] = updated
         return updated
@@ -423,6 +456,15 @@ class BwServeVault:
 
     def list_items(self, url: str) -> list[VaultItem]:
         query = urllib.parse.urlencode({'url': url})
+        return self._list_items_query(query)
+
+    def search_items(self, query_text: str) -> list[VaultItem]:
+        if not query_text.strip():
+            return []
+        query = urllib.parse.urlencode({'search': query_text})
+        return self._list_items_query(query)
+
+    def _list_items_query(self, query: str) -> list[VaultItem]:
         data = self._request('GET', '/list/object/items?' + query)
         if not isinstance(data, dict):
             raise VaultError("Bitwarden serve returned an invalid item list")
@@ -484,23 +526,31 @@ class BwServeVault:
             raise VaultError("Bitwarden serve returned an invalid item")
         return item
 
-    def update_login(self, item_id: str, *, username: str,
-                     password: str, url: str) -> VaultItem:
+    def update_login(self, item_id: str, *,
+                     username: str | None = None,
+                     password: str | None = None,
+                     url: str | None = None,
+                     add_uri: bool = False) -> VaultItem:
         raw = self.get_raw_item(item_id)
         login = raw.get('login')
         if not isinstance(login, dict):
             login = {}
-        login['username'] = username
-        login['password'] = password
-        uris = login.get('uris')
-        if not isinstance(uris, list):
-            uris = []
-        origin = _origin(url)
-        if not any(isinstance(uri, dict) and
-                   _hosts_match(str(uri.get('uri', '')), origin)
-                   for uri in uris):
-            uris.append({'uri': origin})
-        login['uris'] = uris
+        if username is not None:
+            login['username'] = username
+        if password is not None:
+            login['password'] = password
+        if url is not None:
+            uris = login.get('uris')
+            if not isinstance(uris, list):
+                uris = []
+            origin = _origin(url)
+            if not any(isinstance(uri, dict) and
+                       _hosts_match(str(uri.get('uri', '')), origin)
+                       for uri in uris):
+                uris.append({'uri': origin})
+            login['uris'] = uris
+        elif add_uri:
+            raise VaultError("URL required when adding a URI")
         raw['login'] = login
         path = '/object/item/' + urllib.parse.quote(item_id, safe='')
         data = self._request(
@@ -580,7 +630,10 @@ class BitwardenComponent:
         self._unlock_callbacks: list[Callable[[bool, str | None], None]] = []
         self._unlock_suppressed_until = 0.0
         self._save_prompt_active = False
-        self._save_seen: set[tuple[str, str, str, str]] = set()
+        self._save_seen: set[tuple[str, str, str, str, str]] = set()
+        self._save_current_key: tuple[str, str, str, str, str] | None = None
+        self._selected: dict[tuple[Any, str, str], dict[str, Any]] = {}
+        self._selection_ttl = 300.0
 
     @staticmethod
     def _make_vault() -> Any:
@@ -666,7 +719,7 @@ class BitwardenComponent:
 
     # Messaging
 
-    def on_message(self, message_obj: messaging.Message) -> None:
+    def on_message(self, message_obj: messaging.Message) -> None:  # noqa: C901
         if message_obj.channel != CHANNEL:
             return
         payload = message_obj.payload
@@ -676,18 +729,23 @@ class BitwardenComponent:
 
         form = payload.get('form')
         form_id = payload.get('form_id')
+        document_id = payload.get('document_id')
+        source = payload.get('source')
 
         if message_type == 'fieldFocus':
             if _form_blocks_autofill(form):
                 return
             url = payload.get('url') or message_obj.frame.url.toString()
             self._lookup(url, lambda items, error: self._send_candidates(
-                message_obj, items, error, form_id=form_id))
+                message_obj, items, error, form_id=form_id,
+                document_id=document_id))
         elif message_type == 'fill':
             item_id = payload.get('item_id')
             if isinstance(item_id, str):
                 self._send_credentials(
-                    message_obj, item_id, auto=False, form_id=form_id)
+                    message_obj, item_id, auto=False, form_id=form_id,
+                    document_id=document_id, source=source,
+                    url=payload.get('url'))
         elif message_type == 'autoFillRequest':
             if not self._autofill_on_load or _form_blocks_autofill(form):
                 return
@@ -695,6 +753,10 @@ class BitwardenComponent:
             self._lookup(url, lambda items, error: self._auto_fill_items(
                 message_obj.tab, url, items, error,
                 frame=message_obj.frame, form_id=form_id))
+        elif message_type == 'searchItems':
+            self._handle_search(message_obj, payload)
+        elif message_type == 'routeChanged':
+            self._handle_route_changed(message_obj, payload)
         elif message_type == 'filled':
             log.extensions.debug(
                 "Bitwarden fill reported: auto=%s generated=%s",
@@ -706,32 +768,145 @@ class BitwardenComponent:
 
     def _send_candidates(self, message_obj: messaging.Message,
                          items: list[VaultItem] | None,
-                         error: str | None, *, form_id: Any = None) -> None:
+                         error: str | None, *, form_id: Any = None,
+                         document_id: Any = None) -> None:
         if error:
             log.extensions.warning("Bitwarden lookup failed: %s", error)
-            return
         summaries = [
             {'id': item.id, 'name': item.name, 'username': item.username}
             for item in items or []
         ]
         self._send(message_obj.tab,
                    {'type': 'candidates', 'items': summaries,
-                    'form_id': form_id},
+                    'form_id': form_id, 'document_id': document_id,
+                    'error': error},
                    message_obj.frame)
+
+    def _handle_search(self, message_obj: messaging.Message,
+                       payload: dict[str, Any]) -> None:
+        if not message_obj.is_main or message_obj.tab.is_private:
+            return
+        query = payload.get('query')
+        if not isinstance(query, str) or not query.strip():
+            return
+        request_id = payload.get('request_id')
+        form_id = payload.get('form_id')
+        document_id = payload.get('document_id')
+        self._search(
+            query,
+            lambda items, error: self._send_search_results(
+                message_obj, request_id, form_id, document_id,
+                items, error))
+
+    def _send_search_results(self, message_obj: messaging.Message,
+                             request_id: Any, form_id: Any,
+                             document_id: Any,
+                             items: list[VaultItem] | None,
+                             error: str | None) -> None:
+        if error:
+            log.extensions.warning("Bitwarden search failed: %s", error)
+            self._send(message_obj.tab, {
+                'type': 'searchError',
+                'request_id': request_id,
+                'document_id': document_id,
+                'form_id': form_id,
+                'error': error,
+            }, message_obj.frame)
+            return
+        summaries = [
+            {'id': item.id, 'name': item.name, 'username': item.username}
+            for item in items or []
+        ][:20]
+        self._send(message_obj.tab, {
+            'type': 'searchResults',
+            'request_id': request_id,
+            'document_id': document_id,
+            'form_id': form_id,
+            'items': summaries,
+        }, message_obj.frame)
+
+    def _search(self, query: str,
+                callback: Callable[[list[VaultItem] | None, str | None],
+                                   None], *,
+                allow_retry: bool = True) -> None:
+        self._ensure_unlocked(
+            lambda unlocked, error: self._search_unlocked(
+                query, callback, unlocked, error, allow_retry=allow_retry))
+
+    def _search_unlocked(self, query: str,
+                         callback: Callable[
+                             [list[VaultItem] | None, str | None], None],
+                         unlocked: bool, error: str | None, *,
+                         allow_retry: bool) -> None:
+        if not unlocked:
+            callback(None, error)
+            return
+
+        def on_items(items: list[VaultItem] | None,
+                     error: str | None) -> None:
+            if error and allow_retry and _is_session_error(error):
+                self._search(query, callback, allow_retry=False)
+                return
+            callback(items, error)
+
+        self._run(lambda: self._vault.search_items(query), on_items)
+
+    def _record_selection(self, message_obj: messaging.Message,
+                          item: VaultItem, *, form_id: Any,
+                          document_id: Any, url: Any) -> None:
+        if not form_id or not document_id:
+            return
+        self._prune_selections()
+        tab_id = getattr(message_obj.tab, 'tab_id', id(message_obj.tab))
+        url_text = url or message_obj.frame.url.toString()
+        key = (tab_id, str(document_id), str(form_id))
+        self._selected[key] = {
+            'item_id': item.id,
+            'username': item.username,
+            'origin': _origin(url_text),
+            'document_url': url_text,
+            'created': time.monotonic(),
+        }
+
+    def _prune_selections(self) -> None:
+        cutoff = time.monotonic() - self._selection_ttl
+        for key, selection in list(self._selected.items()):
+            if selection.get('created', 0) < cutoff:
+                del self._selected[key]
+        while len(self._selected) > 256:
+            self._selected.pop(next(iter(self._selected)))
+
+    def _handle_route_changed(self, message_obj: messaging.Message,
+                              payload: dict[str, Any]) -> None:
+        if not message_obj.is_main:
+            return
+        tab_id = getattr(message_obj.tab, 'tab_id', id(message_obj.tab))
+        document_id = payload.get('document_id')
+        for key in list(self._selected):
+            if key[0] == tab_id and key[1] == str(document_id):
+                del self._selected[key]
 
     def _send_credentials(self, message_obj: messaging.Message,
                           item_id: str, *, auto: bool,
-                          form_id: Any = None) -> None:
+                          form_id: Any = None, document_id: Any = None,
+                          source: Any = None, url: Any = None) -> None:
         self._run(
             lambda: self._vault.get_item(item_id),
             functools.partial(
-                self._on_item, message_obj, auto=auto, form_id=form_id))
+                self._on_item, message_obj, auto=auto, form_id=form_id,
+                document_id=document_id, source=source, url=url))
 
     def _on_item(self, message_obj: messaging.Message, item: Any,
-                 error: str | None, *, auto: bool, form_id: Any = None) -> None:
+                 error: str | None, *, auto: bool, form_id: Any = None,
+                 document_id: Any = None, source: Any = None,
+                 url: Any = None) -> None:
         if error or item is None:
             log.extensions.warning("Bitwarden item lookup failed: %s", error)
             return
+        if not auto and message_obj.is_main:
+            self._record_selection(
+                message_obj, item, form_id=form_id,
+                document_id=document_id, url=url)
         totp = None
         if item.totp:
             self._run(
@@ -843,8 +1018,29 @@ class BitwardenComponent:
             'form_id': form_id,
             'password': result,
         }, message_obj.frame)
-
     # Save/update
+
+    def _discard_save_key(self) -> None:
+        if self._save_current_key is not None:
+            self._save_seen.discard(self._save_current_key)
+            self._save_current_key = None
+
+    def _selection_for(self, message_obj: messaging.Message, url: str,
+                       username: str, form_id: Any,
+                       document_id: Any) -> dict[str, Any] | None:
+        if not form_id or not document_id:
+            return None
+        self._prune_selections()
+        tab_id = getattr(message_obj.tab, 'tab_id', id(message_obj.tab))
+        selection = self._selected.get(
+            (tab_id, str(document_id), str(form_id)))
+        if selection is None:
+            return None
+        if str(selection.get('username', '')).casefold() != username.casefold():
+            return None
+        if _origin(str(selection.get('document_url', ''))) != _origin(url):
+            return None
+        return selection
 
     def _handle_save_candidate(self, message_obj: messaging.Message,
                                payload: dict[str, Any]) -> None:
@@ -857,6 +1053,7 @@ class BitwardenComponent:
         registration_strong = bool(payload.get('registration_strong'))
         password_change = bool(payload.get('password_change'))
         form_id = payload.get('form_id')
+        document_id = payload.get('document_id')
         if not isinstance(url, str) or not url.startswith(('http://', 'https://')):
             return
         if not isinstance(password, str) or not password:
@@ -867,20 +1064,65 @@ class BitwardenComponent:
             log.extensions.debug(
                 "Bitwarden save skipped: weak registration evidence")
             return
-        key = (url, username, password, str(form_id))
+        key = (url, username, password, str(form_id), str(document_id))
         if key in self._save_seen:
             return
         if self._save_prompt_active:
             log.extensions.debug("Bitwarden save skipped: prompt active")
             return
         self._save_seen.add(key)
+        self._save_current_key = key
         self._save_prompt_active = True
         log.extensions.debug("Bitwarden save candidate for %s", url)
+
+        selection = self._selection_for(
+            message_obj, url, username, form_id, document_id)
+        if selection is not None:
+            self._run(
+                lambda: self._vault.get_raw_item(selection['item_id']),
+                functools.partial(
+                    self._on_selected_item, url, username, password))
+            return
+
         self._lookup(
             url,
             lambda items, error: self._on_save_lookup(
                 items, error, url, username, password,
                 registration=registration, password_change=password_change))
+
+    def _on_selected_item(self, url: str, username: str, password: str,
+                          raw: Any, error: str | None) -> None:
+        if error or not isinstance(raw, dict):
+            log.extensions.warning(
+                "Bitwarden selected item lookup failed: %s", error)
+            self._save_prompt_active = False
+            self._discard_save_key()
+            message.error("Bitwarden save failed: {}".format(
+                error or "item unavailable"))
+            return
+        item = _normalize_item(raw)
+        if item is None:
+            log.extensions.warning("Bitwarden selected item has no login")
+            self._save_prompt_active = False
+            self._discard_save_key()
+            return
+        if item.username.casefold() != username.casefold():
+            log.extensions.debug(
+                "Bitwarden selected item username changed; skipping")
+            self._save_prompt_active = False
+            self._discard_save_key()
+            return
+        origin = _origin(url)
+        uri_present = any(_hosts_match(uri, origin) for uri in item.uris)
+        same_password = item.password == password
+        if uri_present and same_password:
+            self._save_prompt_active = False
+            self._save_current_key = None
+            return
+        self._prompt_selected_save(
+            item, url, username, password,
+            add_uri=not uri_present,
+            update_password=not same_password)
 
     def _on_save_lookup(self, items: list[VaultItem] | None,
                         error: str | None, url: str, username: str,
@@ -889,6 +1131,7 @@ class BitwardenComponent:
         if error:
             log.extensions.warning("Bitwarden save lookup failed: %s", error)
             self._save_prompt_active = False
+            self._discard_save_key()
             return
         matches = [
             item for item in items or []
@@ -898,17 +1141,20 @@ class BitwardenComponent:
             log.extensions.debug(
                 "Bitwarden save skipped: multiple username matches")
             self._save_prompt_active = False
+            self._save_current_key = None
             return
         if matches:
             item = matches[0]
             if item.password == password:
                 self._save_prompt_active = False
+                self._save_current_key = None
                 return
             if registration and not password_change:
                 log.extensions.debug(
                     "Bitwarden registration save skipped: "
                     "existing username with different password")
                 self._save_prompt_active = False
+                self._save_current_key = None
                 return
             self._prompt_save(item, url, username, password)
             return
@@ -926,6 +1172,7 @@ class BitwardenComponent:
         def answered(answer: bool) -> None:
             if not answer:
                 self._save_prompt_active = False
+                self._discard_save_key()
                 return
             if item is None:
                 self._run(
@@ -941,7 +1188,46 @@ class BitwardenComponent:
 
         def cancelled() -> None:
             self._save_prompt_active = False
+            self._discard_save_key()
             log.extensions.debug("Bitwarden save cancelled")
+
+        qmessage.ask_async(
+            title, usertypes.PromptMode.yesno, answered,
+            cancelled=cancelled)
+
+    def _prompt_selected_save(self, item: VaultItem, url: str,
+                              username: str, password: str, *,
+                              add_uri: bool, update_password: bool) -> None:
+        host = urlparse(url).hostname or url
+        name = item.name or item.username or host
+        if add_uri and update_password:
+            title = "Update password and add {} to {}?".format(host, name)
+        elif add_uri:
+            title = "Add {} to {}?".format(host, name)
+        else:
+            title = "Update password for {} on {}?".format(name, host)
+
+        def answered(answer: bool) -> None:
+            if not answer:
+                self._save_prompt_active = False
+                self._discard_save_key()
+                return
+            if update_password:
+                self._run(
+                    lambda: self._vault.update_login(
+                        item.id, username=username, password=password,
+                        url=url, add_uri=add_uri),
+                    self._on_save_written)
+            else:
+                self._run(
+                    lambda: self._vault.update_login(
+                        item.id, url=url, add_uri=True),
+                    self._on_save_written)
+
+        def cancelled() -> None:
+            self._save_prompt_active = False
+            self._discard_save_key()
+            log.extensions.debug("Bitwarden add-URI prompt cancelled")
 
         qmessage.ask_async(
             title, usertypes.PromptMode.yesno, answered,
@@ -950,8 +1236,10 @@ class BitwardenComponent:
     def _on_save_written(self, _result: Any, error: str | None) -> None:
         self._save_prompt_active = False
         if error:
+            self._discard_save_key()
             message.error("Bitwarden save failed: {}".format(error))
         else:
+            self._save_current_key = None
             message.info("Bitwarden login saved")
 
     def _send(self, tab: apitypes.ExtensionTab, payload: dict[str, Any],
