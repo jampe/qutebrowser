@@ -154,10 +154,10 @@ SCRIPTLET_RESOURCES = [
     ("jsonl-edit-fetch-response.fn", [], "javascript", ['collate-fetch-arguments.fn', 'jsonpath.fn', 'jsonl-edit.fn', 'match-object-properties.fn', 'parse-properties-to-match.fn', 'proxy-apply.fn', 'safe-self.fn']),
     ("jsonl-edit-fetch-response.js", [], "javascript", ['jsonl-edit-fetch-response.fn']),
     ("trusted-jsonl-edit-fetch-response.js", [], "javascript", ['jsonl-edit-fetch-response.fn']),
-    ("json-prune.js", [], "javascript", ['proxy-apply.fn', 'safe-self.fn']),
-    ("json-prune-fetch-response.js", [], "javascript", ['collate-fetch-arguments.fn', 'match-object-properties.fn', 'parse-properties-to-match.fn', 'safe-self.fn']),
-    ("json-prune-xhr-response.js", [], "javascript", ['match-object-properties.fn', 'parse-properties-to-match.fn', 'safe-self.fn']),
-    ("evaldata-prune.js", [], "javascript", ['proxy-apply.fn']),
+    ("json-prune.js", [], "javascript", ['object-prune.fn', 'proxy-apply.fn', 'safe-self.fn']),
+    ("json-prune-fetch-response.js", [], "javascript", ['collate-fetch-arguments.fn', 'match-object-properties.fn', 'object-prune.fn', 'parse-properties-to-match.fn', 'safe-self.fn']),
+    ("json-prune-xhr-response.js", [], "javascript", ['match-object-properties.fn', 'object-prune.fn', 'parse-properties-to-match.fn', 'safe-self.fn']),
+    ("evaldata-prune.js", [], "javascript", ['object-prune.fn', 'proxy-apply.fn']),
     ("noeval-if.js", ['prevent-eval-if.js'], "javascript", ['proxy-apply.fn', 'safe-self.fn']),
     ("object-find-owner.fn", [], "javascript", ['safe-self.fn']),
     ("object-prune.fn", [], "javascript", ['matches-stack-trace.fn', 'object-find-owner.fn', 'safe-self.fn']),
@@ -530,3 +530,17 @@ def test_scriptlet_dependencies(scriptlet_resources):
         "validate-constant.fn",
     ]
     assert by_name["validate-constant.fn"].dependencies == ["safe-self.fn"]
+
+    # Dependencies registered by modules loaded later must survive the
+    # deferred registration (object-prune.js sorts after json-prune.js).
+    for name in [
+        "json-prune.js",
+        "json-prune-fetch-response.js",
+        "json-prune-xhr-response.js",
+        "evaldata-prune.js",
+    ]:
+        assert "object-prune.fn" in by_name[name].dependencies, name
+    object_prune = base64.b64decode(
+        by_name["object-prune.fn"].content
+    ).decode("utf-8")
+    assert "function objectPruneFn(" in object_prune

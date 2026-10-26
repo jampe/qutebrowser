@@ -712,52 +712,55 @@ def _preprocess_scriptlets_js(content: str) -> str:
     # and hook registeredScriptlets.push to capture registrations.
     stubs = '''
 var registeredScriptlets = [];
-var builtinScriptlets = [];
+var builtinScriptlets = registeredScriptlets;
 var scriptletGlobals = { canDebug: false };
 
-// registerScriptlet — replicates upstream base.js behavior AND notifies bridge.
-// Used by submodule scriptlets (imported from ./base.js, stripped here).
+// registerScriptlet — replicates upstream base.js behavior.
+// Bridge registration happens after all modules are evaluated (see the flush
+// appended in Phase 5), because dependencies can be defined by modules that
+// are loaded later (e.g. objectPruneFn in object-prune.js).
 function registerScriptlet(fn, details) {
     if (typeof details !== 'object') { throw new ReferenceError('Missing scriptlet details'); }
     details.fn = fn;
     fn.details = details;
-    if (Array.isArray(details.dependencies)) {
-        details.dependencies.forEach(function(fn, i, array) {
-            if (typeof fn !== 'function') { return; }
-            if (fn.details === undefined) { return; }
-            array[i] = fn.details.name;
-        });
-    }
     registeredScriptlets.push(details);
 }
+'''
 
-// Hook registeredScriptlets.push — catches BOTH registerScriptlet() pushes
-// AND builtinScriptlets.push() (since builtinScriptlets = registeredScriptlets).
-const _origScriptletPush = registeredScriptlets.push;
-registeredScriptlets.push = function(item) {
-    if (item && typeof item === 'object' && item.name && item.fn) {
-        Bridge.registerScriptlet(item.name, item.fn, item.dependencies || []);
+    flush = '''
+// Deferred registration: resolve dependencies now that every module has run.
+(function() {
+    var seen = {};
+    for (var i = 0; i < registeredScriptlets.length; i++) {
+        var item = registeredScriptlets[i];
+        if (item === null || typeof item !== 'object') { continue; }
+        if (!item.name || typeof item.fn !== 'function') { continue; }
+        if (seen[item.name] === true) { continue; }
+        seen[item.name] = true;
+        var deps = [];
+        if (Array.isArray(item.dependencies)) {
+            for (var j = 0; j < item.dependencies.length; j++) {
+                var dep = item.dependencies[j];
+                if (typeof dep === 'string') {
+                    deps.push(dep);
+                } else if (dep && dep.details && dep.details.name) {
+                    deps.push(dep.details.name);
+                }
+            }
+        }
+        Bridge.registerScriptlet(item.name, item.fn, deps);
         if (item.aliases) {
             Bridge.registerAliases(item.name, item.aliases);
         }
     }
-    return _origScriptletPush.call(this, item);
-};
-
-builtinScriptlets.push = function(item) {
-    if (item && typeof item === 'object' && item.name && item.fn) {
-        Bridge.registerScriptlet(item.name, item.fn, item.dependencies || []);
-        if (item.aliases) {
-            Bridge.registerAliases(item.name, item.aliases);
-        }
-    }
-};
+})();
 '''
 
     # --- Phase 5: Assemble ---
     parts = [stubs]
     parts.extend(module_parts)
     parts.append(main_js)
+    parts.append(flush)
 
     return '\n\n'.join(parts)
 

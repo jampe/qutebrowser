@@ -1305,7 +1305,10 @@ def test_injected_script_has_dependencies(
 ):
     """Scriptlet resources include their helper functions."""
     filter_path = tmp_path / "filters.txt"
-    filter_path.write_text("example.com##+js(set-constant, adblockTest, 42)\n")
+    filter_path.write_text(
+        "example.com##+js(set-constant, adblockTest, 42)\n"
+        "example.com##+js(json-prune, adPlacements)\n"
+    )
 
     config_stub.val.content.blocking.adblock.lists = [filter_path.as_uri()]
     config_stub.val.content.blocking.enabled = True
@@ -1322,9 +1325,13 @@ def test_injected_script_has_dependencies(
         "function runAt(",
         "function setConstantFn(",
         "function validateConstantFn(",
+        # json-prune.js depends on object-prune.js, which is loaded later.
+        "function objectPruneFn(",
+        "function jsonPrune(",
     ]:
         assert marker in script
     assert 'setConstant("adblockTest", "42")' in script
+    assert 'jsonPrune("adPlacements")' in script
 
 
 def test_read_cache_loads_scriptlet_resources(
